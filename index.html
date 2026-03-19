@@ -257,533 +257,177 @@
 
 </div>
 
-<div id="footer">SHOULD I BE TRADING? · APPFORGELABS · DATA: FINNHUB + POLYGON · NOT FINANCIAL ADVICE</div>
+<div id="footer">SHOULD I BE TRADING? · APPFORGELABS · DATA: LUKA PIPELINE · NOT FINANCIAL ADVICE</div>
 
 <script>
-// ─── CONFIG ────────────────────────────────────────────────────────────────
-const FINNHUB_KEY = 'd6952r9r01qs7u9kq240d6952r9r01qs7u9kq24g';
-const POLYGON_KEY = 'D2BcKzvYOpCfDBmHedtLAHu2CV3jKtU7';
+// ─── CONFIG ─────────────────────────────────────────────────────────────────
+const SIBT_URL = 'https://appforgelabs.github.io/PulseForge/data/sibt.json';
 const REFRESH_INTERVAL = 45000;
-const STALE_THRESHOLD = 300000;
-
-// Polygon ticker map (ETFs only — index candles not available on free tier)
-const POLYGON_TICKERS = {
-  SPY:'SPY', QQQ:'QQQ',
-  XLK:'XLK', XLF:'XLF', XLE:'XLE', XLV:'XLV', XLI:'XLI',
-  XLY:'XLY', XLP:'XLP', XLU:'XLU', XLB:'XLB', XLRE:'XLRE', XLC:'XLC'
-};
-
-// Finnhub ticker map (quote endpoint only, use for real-time)
-const FINNHUB_TICKERS = {
-  SPY:'SPY', QQQ:'QQQ',
-  XLK:'XLK', XLF:'XLF', XLE:'XLE', XLV:'XLV', XLI:'XLI',
-  XLY:'XLY', XLP:'XLP', XLU:'XLU', XLB:'XLB', XLRE:'XLRE', XLC:'XLC'
-};
-
-const SECTORS = ['XLK','XLF','XLE','XLV','XLI','XLY','XLP','XLU','XLB','XLRE','XLC'];
-const SECTOR_NAMES = {
-  XLK:'Technology', XLF:'Financials', XLE:'Energy', XLV:'Healthcare',
-  XLI:'Industrials', XLY:'Cons. Disc.', XLP:'Cons. Staples', XLU:'Utilities',
-  XLB:'Materials', XLRE:'Real Estate', XLC:'Comm. Services'
-};
-
-// FOMC 2026 dates (±3 day window triggers alert)
-const FOMC_DATES = [
-  '2026-01-28','2026-01-29',
-  '2026-03-18','2026-03-19',
-  '2026-05-06','2026-05-07',
-  '2026-06-17','2026-06-18',
-  '2026-07-29','2026-07-30',
-  '2026-09-16','2026-09-17',
-  '2026-11-04','2026-11-05',
-  '2026-12-15','2026-12-16'
-];
 
 let currentMode = 'swing';
 let lastFetch = null;
-let marketData = {};
-let scores = {};
 let refreshTimer = null;
-let updateTimer = null;
+let counterInterval = null;
 
-// ─── DATA FETCHING ──────────────────────────────────────────────────────────
-// Strategy:
-//   Finnhub  → 16 parallel real-time quotes (CORS-native, 60 req/min free)
-//   Polygon  → 2 calls only: SPY + QQQ 252-day history (for SMA/RSI)
-//   Polygon  → grouped market endpoint: all sectors in 1 call per date
-
-async function fetchAllQuotes() {
-  const tickers = ['SPY','QQQ','VIXY','TLT','UUP', ...SECTORS];
-  const results = await Promise.all(tickers.map(s =>
-    fetch(`https://finnhub.io/api/v1/quote?symbol=${s}&token=${FINNHUB_KEY}`, {signal: AbortSignal.timeout(8000)})
-      .then(r => r.json())
-      .then(d => ({s, c: d.c, pc: d.pc, dp: d.dp}))
-      .catch(() => ({s, c: null, pc: null, dp: null}))
-  ));
-  const map = {};
-  results.forEach(r => { map[r.s] = r; });
-  return map;
-}
-
-async function fetchPolygonHistory(ticker) {
-  const to = new Date().toISOString().slice(0, 10);
-  const from = new Date(Date.now() - 400*86400*1000).toISOString().slice(0, 10);
-  const url = `https://api.polygon.io/v2/aggs/ticker/${ticker}/range/1/day/${from}/${to}?adjusted=true&sort=asc&limit=252&apiKey=${POLYGON_KEY}`;
+// ─── DATA LOAD ───────────────────────────────────────────────────────────────
+async function loadSIBT() {
   try {
-    const res = await fetch(url, {signal: AbortSignal.timeout(12000)});
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data.results ? data.results.map(r => r.c) : [];
-  } catch(e) { return []; }
-}
-
-function getRecentTradingDates(n) {
-  const dates = [];
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
-  while (dates.length < n) {
-    const dow = d.getDay();
-    if (dow !== 0 && dow !== 6) dates.unshift(d.toISOString().slice(0, 10));
-    d.setDate(d.getDate() - 1);
+    const res = await fetch(SIBT_URL + '?t=' + Date.now(), {cache: 'no-store', signal: AbortSignal.timeout(12000)});
+    if (!res.ok) return null;
+    return await res.json();
+  } catch(e) {
+    console.error('SIBT load error:', e);
+    return null;
   }
-  return dates;
 }
 
-async function fetchSectorHistory(quotes) {
-  const dates = getRecentTradingDates(6);
-  const groupedByDate = {};
-  for (const date of dates) {
-    try {
-      const res = await fetch(
-        `https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/${date}?adjusted=true&apiKey=${POLYGON_KEY}`,
-        {signal: AbortSignal.timeout(10000)}
-      );
-      if (res.ok) {
-        const data = await res.json();
-        if (data.results) {
-          groupedByDate[date] = {};
-          data.results.forEach(r => { groupedByDate[date][r.T] = r.c; });
-        }
-      }
-    } catch(e) {}
-    await new Promise(r => setTimeout(r, 350));
-  }
-  const sectorCloses = {};
-  for (const sym of SECTORS) {
-    const closes = [];
-    for (const date of dates) {
-      if (groupedByDate[date] && groupedByDate[date][sym] != null) {
-        closes.push(groupedByDate[date][sym]);
-      }
-    }
-    if (quotes[sym] && quotes[sym].c) closes.push(quotes[sym].c);
-    // Pad to 52 entries so 50d SMA works (using prev close)
-    if (closes.length < 52 && quotes[sym] && quotes[sym].pc) {
-      const pad = Array(52 - closes.length).fill(quotes[sym].pc);
-      sectorCloses[sym] = [...pad, ...closes];
-    } else {
-      sectorCloses[sym] = closes;
-    }
-  }
-  return sectorCloses;
+// ─── UI HELPERS ──────────────────────────────────────────────────────────────
+function statusClass(status) {
+  const m = {'HEALTHY':'status-healthy','NEUTRAL':'status-neutral','CAUTION':'status-caution','RISK-OFF':'status-riskoff'};
+  return m[status] || 'status-neutral';
 }
 
-function tltToTNX(tlt) {
-  if (!tlt) return 4.3;
-  return +Math.max(2.5, Math.min(6.0, (475 - 4 * tlt) / 100)).toFixed(2);
-}
-
-function uupToDXY(uup) {
-  if (!uup) return 103;
-  return +(uup * 3.57).toFixed(1);
-}
-
-// ─── FOMC CHECK ─────────────────────────────────────────────────────────────
-function checkFOMC() {
-  const today = new Date();
-  for (const dateStr of FOMC_DATES) {
-    const fomc = new Date(dateStr + 'T12:00:00');
-    const diff = (fomc - today) / (1000*60*60*24);
-    if (diff >= -1 && diff <= 3) {
-      const days = Math.ceil(diff);
-      const banner = document.getElementById('alert-banner');
-      banner.style.display = 'block';
-      if (days <= 0) {
-        banner.textContent = '⚠️ FOMC MEETING TODAY — ELEVATED VOLATILITY — REDUCE POSITION SIZING';
-      } else {
-        banner.textContent = `⚠️ FOMC MEETING IN ${days} DAY${days>1?'S':''} — PRE-FOMC CAUTION — REDUCE POSITION SIZING`;
-      }
-      return days <= 0 ? 0 : days;
-    }
-  }
-  document.getElementById('alert-banner').style.display = 'none';
-  return null;
-}
-
-// ─── SCORING ENGINE ──────────────────────────────────────────────────────────
-function scoreVolatility(vixPrice, vixCloses, modeAdj=0) {
-  if (vixPrice === null) return 50;
-  const threshold = modeAdj; // day mode subtracts 2 from thresholds
-  let score;
-  const v = vixPrice - threshold;
-  if (v < 15) score = 90 + Math.min(10, (15-v)*2);
-  else if (v < 20) score = 70 + (20-v)*4;
-  else if (v < 25) score = 40 + (25-v)*6;
-  else if (v < 30) score = 15 + (30-v)*5;
-  else score = Math.max(0, 10 - (v-30)*2);
-  score = Math.min(100, Math.max(0, score));
-
-  // 5d slope bonus
-  if (vixCloses.length >= 5) {
-    const slope = vixCloses[vixCloses.length-1] - vixCloses[vixCloses.length-5];
-    if (slope < 0) score = Math.min(100, score + 5);
-    if (slope > 3) score = Math.max(0, score - 10);
-  }
-  return Math.round(score);
-}
-
-function scoreTrend(spyCloses, qqqCloses, modeAdj=0) {
-  if (!spyCloses.length) return 50;
-  const spy = spyCloses[spyCloses.length-1];
-  const sma200 = calcSMA(spyCloses, 200);
-  const sma50 = calcSMA(spyCloses, 50);
-  const sma20 = calcSMA(spyCloses, 20);
-  const qqqSma50 = calcSMA(qqqCloses, 50);
-  const qqq = qqqCloses[qqqCloses.length-1];
-  const rsi = calcRSI(spyCloses);
-
-  let pts = 0;
-  if (sma200 && spy > sma200) pts += 25;
-  if (sma50 && spy > sma50) pts += 20;
-  if (sma20 && spy > sma20) pts += 15;
-  if (qqqSma50 && qqq > qqqSma50) pts += 15;
-
-  if (rsi !== null) {
-    if (rsi >= 50 && rsi <= 70) pts += 25;
-    else if (rsi >= 40 && rsi < 50) pts += 15;
-    else if (rsi >= 30 && rsi < 40) pts += 5;
-    else if (rsi < 30) pts += 10;
-    else if (rsi > 70 && rsi <= 80) pts += 15;
-    else if (rsi > 80) pts += 5;
-  } else pts += 12;
-
-  return Math.min(100, Math.round(pts));
-}
-
-function scoreBreadth(sectorCloses) {
-  // Count sectors above 50d SMA
-  let above = 0;
-  let total = 0;
-  for (const [sym, closes] of Object.entries(sectorCloses)) {
-    if (!closes || closes.length < 50) continue;
-    total++;
-    const price = closes[closes.length-1];
-    const sma50 = calcSMA(closes, 50);
-    if (sma50 && price > sma50) above++;
-  }
-  if (total === 0) return 50;
-  const count = above;
-  if (count >= 9) return Math.round(90 + (count-9)*5);
-  if (count >= 6) return Math.round(60 + (count-6)*10);
-  if (count >= 3) return Math.round(30 + (count-3)*8);
-  return Math.round(count * 8);
-}
-
-function scoreMomentum(sectorCloses) {
-  const perfs = [];
-  for (const sym of SECTORS) {
-    const closes = sectorCloses[sym];
-    if (!closes || closes.length < 6) continue;
-    const p = pctChange(closes, 5);
-    if (p !== null) perfs.push({sym, p});
-  }
-  if (perfs.length < 3) return 50;
-  perfs.sort((a,b) => b.p - a.p);
-  const top3 = perfs.slice(0,3).map(x=>x.p);
-  const bot3 = perfs.slice(-3).map(x=>x.p);
-  const avgTop = top3.reduce((a,b)=>a+b,0)/top3.length;
-  const avgBot = bot3.reduce((a,b)=>a+b,0)/bot3.length;
-  const spread = avgTop - avgBot;
-
-  let score;
-  if (spread > 5) score = 85 + Math.min(15,(spread-5)*3);
-  else if (spread > 3) score = 65 + (spread-3)*10;
-  else if (spread > 1) score = 40 + (spread-1)*12.5;
-  else score = Math.max(10, spread*10);
-
-  // XLK bonus
-  if (perfs.slice(0,3).some(x=>x.sym==='XLK')) score = Math.min(100, score + 5);
-  return Math.round(Math.min(100, Math.max(0, score)));
-}
-
-function scoreMacro(tnxPrice, dxyPrice, fomcDays) {
-  let score = 0;
-  let weight = 0;
-
-  if (tnxPrice !== null) {
-    // TNX comes as decimal*10 from Yahoo sometimes, check magnitude
-    const tnx = tnxPrice > 20 ? tnxPrice/10 : tnxPrice;
-    let s;
-    if (tnx < 3.5) s = 70;
-    else if (tnx <= 4.5) s = 50;
-    else if (tnx <= 5) s = 30;
-    else s = 15;
-    score += s * 0.5;
-    weight += 0.5;
-  }
-
-  if (dxyPrice !== null) {
-    let s;
-    if (dxyPrice < 100) s = 60;
-    else if (dxyPrice <= 104) s = 45;
-    else s = 30;
-    score += s * 0.5;
-    weight += 0.5;
-  }
-
-  let final = weight > 0 ? score / weight : 50;
-  if (fomcDays !== null && fomcDays >= 0) final = Math.max(0, final - 10);
-  return Math.round(Math.min(100, Math.max(0, final)));
-}
-
-function scoreExecutionWindow(spyCloses, vixCloses, sectorCloses) {
-  let score = 0;
-  // SPY 5d momentum
-  if (spyCloses.length >= 6) {
-    const m = pctChange(spyCloses, 5);
-    if (m !== null && m > 0) score += 30;
-    else if (m !== null && m > -1) score += 15;
-  } else score += 15;
-
-  // Sector dispersion
-  const perfs = SECTORS.map(s => {
-    const c = sectorCloses[s];
-    if (!c || c.length < 6) return null;
-    return pctChange(c, 5);
-  }).filter(x=>x!==null);
-  if (perfs.length >= 6) {
-    const max = Math.max(...perfs), min = Math.min(...perfs);
-    const dispersion = max - min;
-    if (dispersion > 8) score += 25;
-    else if (dispersion > 4) score += 15;
-    else score += 5;
-  } else score += 12;
-
-  // RSI in ideal range
-  const rsi = calcRSI(spyCloses);
-  if (rsi !== null) {
-    if (rsi >= 50 && rsi <= 65) score += 25;
-    else if (rsi >= 45 && rsi < 70) score += 15;
-    else score += 5;
-  } else score += 12;
-
-  // VIX falling
-  if (vixCloses.length >= 5) {
-    const slope = vixCloses[vixCloses.length-1] - vixCloses[vixCloses.length-5];
-    if (slope < 0) score += 20;
-    else if (slope < 1) score += 10;
-  } else score += 10;
-
-  return Math.min(100, score);
-}
-
-function getRegime(trendScore, breadthScore, volScore) {
-  if (trendScore >= 60 && breadthScore >= 60) return 'UPTREND';
-  if (trendScore <= 35 || (breadthScore <= 35 && volScore <= 40)) return 'DOWNTREND';
-  return 'CHOP';
-}
-
-// ─── UI RENDERING ────────────────────────────────────────────────────────────
 function updateGauge(pct) {
   const circumference = 2 * Math.PI * 65;
   const arc = (pct / 100) * circumference;
   const el = document.getElementById('gauge-arc');
   el.setAttribute('stroke-dasharray', `${arc} ${circumference}`);
-  if (pct >= 80) el.setAttribute('stroke', '#00e676');
-  else if (pct >= 60) el.setAttribute('stroke', '#ffab00');
-  else el.setAttribute('stroke', '#ff1744');
+  el.setAttribute('stroke', pct >= 80 ? '#00e676' : pct >= 60 ? '#ffab00' : '#ff1744');
   document.getElementById('gauge-pct').textContent = Math.round(pct);
 }
 
 function renderDecision(mqs) {
   const dt = document.getElementById('decision-text');
-  const label = document.getElementById('mqs-val');
-  label.textContent = mqs.toFixed(1);
+  document.getElementById('mqs-val').textContent = mqs.toFixed(1);
+  const threshold = currentMode === 'day' ? {yes:70, caution:50} : {yes:80, caution:60};
   dt.className = '';
-  if (mqs >= 80) { dt.textContent = 'YES'; dt.className = 'yes'; }
-  else if (mqs >= 60) { dt.textContent = 'CAUTION'; dt.className = 'caution'; }
+  if (mqs >= threshold.yes) { dt.textContent = 'YES'; dt.className = 'yes'; }
+  else if (mqs >= threshold.caution) { dt.textContent = 'CAUTION'; dt.className = 'caution'; }
   else { dt.textContent = 'NO'; dt.className = 'no'; }
 }
 
-function getStatusClass(score) {
-  if (score >= 75) return ['HEALTHY','status-healthy'];
-  if (score >= 55) return ['NEUTRAL','status-neutral'];
-  if (score >= 35) return ['CAUTION','status-caution'];
-  return ['RISK-OFF','status-riskoff'];
-}
-
-function renderVolPanel(vixPrice, vixCloses, score) {
-  const trend = vixCloses.length>=5 ? (vixCloses[vixCloses.length-1]-vixCloses[vixCloses.length-5]) : 0;
-  const dir = trend < 0 ? '↓' : trend > 1 ? '↑' : '→';
-  const dirClass = trend < 0 ? 'up' : trend > 0 ? 'down' : 'flat';
-  const [statusText, statusClass] = getStatusClass(score);
-  const vixPct = vixCloses.length >= 252 ? calcVixPercentile(vixCloses) : '--';
+// ─── PANEL RENDERERS ─────────────────────────────────────────────────────────
+function renderVolPanel(v) {
+  if (!v) return;
+  const dir = v.vix_trend < 0 ? '↓' : v.vix_trend > 1 ? '↑' : '→';
+  const dirClass = v.vix_trend < 0 ? 'up' : v.vix_trend > 0 ? 'down' : 'flat';
   document.getElementById('panel-vol').innerHTML = `
-    <div class="panel-title">VOLATILITY <span class="stale-badge" style="display:${lastFetch && Date.now()-lastFetch>STALE_THRESHOLD?'inline':'none'}">STALE</span></div>
-    <div class="panel-main">VIX ${vixPrice!==null?vixPrice.toFixed(2):'[N/A]'} <span class="panel-dir ${dirClass}">${dir}</span></div>
+    <div class="panel-title">VOLATILITY</div>
+    <div class="panel-main">VIX ${v.vix != null ? v.vix.toFixed(2) : '[N/A]'} <span class="panel-dir ${dirClass}">${dir}</span></div>
     <div class="panel-subs">
-      <div class="panel-sub-row"><span>5D Trend</span><span class="val">${trend>0?'+':''}${trend.toFixed(2)}</span></div>
-      <div class="panel-sub-row"><span>1Y Percentile</span><span class="val">${vixPct !== '--' ? vixPct+'%' : '--'}</span></div>
-      <div class="panel-sub-row"><span>Score</span><span class="val">${score}/100</span></div>
+      <div class="panel-sub-row"><span>5D Trend</span><span class="val">${v.vix_trend > 0 ? '+' : ''}${(v.vix_trend||0).toFixed(2)}</span></div>
+      <div class="panel-sub-row"><span>1Y Percentile</span><span class="val">${v.vix_percentile != null ? v.vix_percentile + '%' : '--'}</span></div>
+      <div class="panel-sub-row"><span>Score</span><span class="val">${v.score}/100</span></div>
     </div>
-    <div class="panel-status ${statusClass}">${statusText}</div>`;
+    <div class="panel-status ${statusClass(v.status)}">${v.status}</div>`;
 }
 
-function calcVixPercentile(closes) {
-  const last = closes[closes.length-1];
-  const sorted = [...closes].sort((a,b)=>a-b);
-  const idx = sorted.findIndex(x=>x>=last);
-  return Math.round((idx/sorted.length)*100);
-}
-
-function renderTrendPanel(spyCloses, qqqCloses, score) {
-  const spy = spyCloses.length ? spyCloses[spyCloses.length-1] : null;
-  const sma200 = calcSMA(spyCloses, 200);
-  const sma50 = calcSMA(spyCloses, 50);
-  const sma20 = calcSMA(spyCloses, 20);
-  const rsi = calcRSI(spyCloses);
-  const dir = sma50 && spy ? (spy > sma50 ? '↑' : '↓') : '→';
-  const dirClass = sma50 && spy ? (spy > sma50 ? 'up' : 'down') : 'flat';
-  const regime = score >= 60 ? (score >= 75 ? 'UPTREND' : 'TRENDING') : (score >= 40 ? 'CHOP' : 'DOWNTREND');
-  const [statusText, statusClass] = getStatusClass(score);
+function renderTrendPanel(t) {
+  if (!t) return;
+  const dir = t.above_sma50 ? '↑' : t.above_sma20 === false ? '↓' : '→';
+  const dirClass = t.above_sma50 ? 'up' : '↓' ? 'down' : 'flat';
+  const smaColor = (v, above) => above === null ? 'var(--muted)' : above ? 'var(--green2)' : 'var(--red)';
   document.getElementById('panel-trend').innerHTML = `
     <div class="panel-title">TREND &amp; STRUCTURE</div>
-    <div class="panel-main">SPY ${spy?spy.toFixed(2):'[N/A]'} <span class="panel-dir ${dirClass}">${dir}</span></div>
+    <div class="panel-main">SPY ${t.spy != null ? t.spy.toFixed(2) : '[N/A]'} <span class="panel-dir ${dirClass}">${dir}</span></div>
     <div class="panel-subs">
-      <div class="panel-sub-row"><span>vs 20d SMA</span><span class="val" style="color:${sma20&&spy?(spy>sma20?'var(--green2)':'var(--red)'):'var(--muted)'}">${sma20&&spy?(spy>sma20?'ABOVE':'BELOW'):'--'}</span></div>
-      <div class="panel-sub-row"><span>vs 50d SMA</span><span class="val" style="color:${sma50&&spy?(spy>sma50?'var(--green2)':'var(--red)'):'var(--muted)'}">${sma50&&spy?(spy>sma50?'ABOVE':'BELOW'):'--'}</span></div>
-      <div class="panel-sub-row"><span>vs 200d SMA</span><span class="val" style="color:${sma200&&spy?(spy>sma200?'var(--green2)':'var(--red)'):'var(--muted)'}">${sma200&&spy?(spy>sma200?'ABOVE':'BELOW'):'--'}</span></div>
-      <div class="panel-sub-row"><span>RSI 14d</span><span class="val">${rsi?rsi.toFixed(1):'--'}</span></div>
-      <div class="panel-sub-row"><span>Regime</span><span class="val">${regime}</span></div>
+      <div class="panel-sub-row"><span>vs 20d SMA</span><span class="val" style="color:${smaColor(t.sma20, t.above_sma20)}">${t.sma20 ? (t.above_sma20 ? 'ABOVE' : 'BELOW') : '--'}</span></div>
+      <div class="panel-sub-row"><span>vs 50d SMA</span><span class="val" style="color:${smaColor(t.sma50, t.above_sma50)}">${t.sma50 ? (t.above_sma50 ? 'ABOVE' : 'BELOW') : '--'}</span></div>
+      <div class="panel-sub-row"><span>vs 200d SMA</span><span class="val" style="color:${smaColor(t.sma200, t.above_sma200)}">${t.sma200 ? (t.above_sma200 ? 'ABOVE' : 'BELOW') : 'N/A'}</span></div>
+      <div class="panel-sub-row"><span>RSI 14d</span><span class="val">${t.rsi != null ? t.rsi.toFixed(1) : '--'}</span></div>
+      <div class="panel-sub-row"><span>Regime</span><span class="val">${t.regime || '--'}</span></div>
     </div>
-    <div class="panel-status ${statusClass}">${statusText}</div>`;
+    <div class="panel-status ${statusClass(t.status)}">${t.status}</div>`;
 }
 
-function renderBreadthPanel(sectorCloses, score) {
-  let above50 = 0, total = 0;
-  for (const [sym, closes] of Object.entries(sectorCloses)) {
-    if (!closes || closes.length < 50) continue;
-    total++;
-    const price = closes[closes.length-1];
-    const sma50 = calcSMA(closes, 50);
-    if (sma50 && price > sma50) above50++;
-  }
-  const [statusText, statusClass] = getStatusClass(score);
+function renderBreadthPanel(b) {
+  if (!b) return;
+  const dir = b.above_50d >= 7 ? '↑' : b.above_50d >= 4 ? '→' : '↓';
+  const dirClass = b.above_50d >= 7 ? 'up' : b.above_50d >= 4 ? 'flat' : 'down';
+  const interp = b.above_50d >= 8 ? 'WIDE' : b.above_50d >= 5 ? 'MIXED' : 'NARROW';
   document.getElementById('panel-breadth').innerHTML = `
     <div class="panel-title">BREADTH</div>
-    <div class="panel-main">${above50}/${total} <span class="panel-dir ${above50>=7?'up':above50>=4?'flat':'down'}">${above50>=7?'↑':above50>=4?'→':'↓'}</span></div>
+    <div class="panel-main">${b.above_50d}/${b.total} <span class="panel-dir ${dirClass}">${dir}</span></div>
     <div class="panel-subs">
-      <div class="panel-sub-row"><span>Sectors above 50d</span><span class="val">${above50} of ${total}</span></div>
-      <div class="panel-sub-row"><span>Breadth Score</span><span class="val">${score}/100</span></div>
-      <div class="panel-sub-row"><span>Interpretation</span><span class="val">${above50>=8?'WIDE':'above50>=5?MIXED':'NARROW'}</span></div>
+      <div class="panel-sub-row"><span>Sectors positive</span><span class="val">${b.above_50d} of ${b.total}</span></div>
+      <div class="panel-sub-row"><span>Breadth Score</span><span class="val">${b.score}/100</span></div>
+      <div class="panel-sub-row"><span>Interpretation</span><span class="val">${interp}</span></div>
     </div>
-    <div class="panel-status ${statusClass}">${statusText}</div>`;
+    <div class="panel-status ${statusClass(b.status)}">${b.status}</div>`;
 }
 
-function renderMomentumPanel(sectorCloses, score) {
-  const perfs = [];
-  for (const sym of SECTORS) {
-    const closes = sectorCloses[sym];
-    if (!closes || closes.length < 6) continue;
-    const p = pctChange(closes, 5);
-    if (p !== null) perfs.push({sym, p});
-  }
-  perfs.sort((a,b)=>b.p-a.p);
-  const top1 = perfs[0];
-  const bot1 = perfs[perfs.length-1];
-  const [statusText, statusClass] = getStatusClass(score);
+function renderMomentumPanel(m) {
+  if (!m) return;
+  const dir = m.score >= 65 ? '↑' : m.score >= 45 ? '→' : '↓';
+  const dirClass = m.score >= 65 ? 'up' : m.score >= 45 ? 'flat' : 'down';
   document.getElementById('panel-mom').innerHTML = `
     <div class="panel-title">MOMENTUM</div>
-    <div class="panel-main">Score ${score} <span class="panel-dir ${score>=65?'up':score>=45?'flat':'down'}">${score>=65?'↑':score>=45?'→':'↓'}</span></div>
+    <div class="panel-main">Score ${m.score} <span class="panel-dir ${dirClass}">${dir}</span></div>
     <div class="panel-subs">
-      <div class="panel-sub-row"><span>Top Sector</span><span class="val" style="color:var(--green2)">${top1?top1.sym+' '+top1.p.toFixed(1)+'%':'--'}</span></div>
-      <div class="panel-sub-row"><span>Weak Sector</span><span class="val" style="color:var(--red)">${bot1?bot1.sym+' '+bot1.p.toFixed(1)+'%':'--'}</span></div>
-      <div class="panel-sub-row"><span>Tech Leadership</span><span class="val">${perfs.slice(0,3).some(x=>x.sym==='XLK')?'YES ✓':'NO'}</span></div>
+      <div class="panel-sub-row"><span>Top Sector</span><span class="val" style="color:var(--green2)">${m.top_sector ? m.top_sector + ' ' + (m.top_pct >= 0 ? '+' : '') + m.top_pct.toFixed(1) + '%' : '--'}</span></div>
+      <div class="panel-sub-row"><span>Weak Sector</span><span class="val" style="color:var(--red)">${m.weak_sector ? m.weak_sector + ' ' + (m.weak_pct >= 0 ? '+' : '') + m.weak_pct.toFixed(1) + '%' : '--'}</span></div>
+      <div class="panel-sub-row"><span>Tech Leadership</span><span class="val">${m.xlk_leading ? 'YES ✓' : 'NO'}</span></div>
     </div>
-    <div class="panel-status ${statusClass}">${statusText}</div>`;
+    <div class="panel-status ${statusClass(m.status)}">${m.status}</div>`;
 }
 
-function renderMacroPanel(tnxPrice, dxyPrice, fomcDays, score) {
-  const tnxDisplay = tnxPrice !== null ? (tnxPrice > 20 ? (tnxPrice/10).toFixed(2) : tnxPrice.toFixed(2)) : null;
-  const dxyDisplay = dxyPrice !== null ? dxyPrice.toFixed(2) : null;
-  const fedStance = tnxDisplay ? (parseFloat(tnxDisplay) < 3.8 ? 'DOVISH' : parseFloat(tnxDisplay) < 4.5 ? 'NEUTRAL' : 'HAWKISH') : '--';
-  const dxyTrend = dxyDisplay ? (parseFloat(dxyDisplay) < 100 ? 'WEAK ↓' : parseFloat(dxyDisplay) < 104 ? 'NEUTRAL →' : 'STRONG ↑') : '--';
-  const [statusText, statusClass] = getStatusClass(score);
+function renderMacroPanel(mc) {
+  if (!mc) return;
   document.getElementById('panel-macro').innerHTML = `
     <div class="panel-title">MACRO / LIQUIDITY</div>
-    <div class="panel-main">10Y ${tnxDisplay||'[N/A]'}% <span class="panel-dir flat">→</span></div>
+    <div class="panel-main">10Y ${mc.tnx != null ? mc.tnx.toFixed(2) : '[N/A]'}% <span class="panel-dir flat">→</span></div>
     <div class="panel-subs">
-      <div class="panel-sub-row"><span>10Y Yield</span><span class="val">${tnxDisplay||'--'}%</span></div>
-      <div class="panel-sub-row"><span>DXY</span><span class="val">${dxyDisplay||'--'}</span></div>
-      <div class="panel-sub-row"><span>Dollar Trend</span><span class="val">${dxyTrend}</span></div>
-      <div class="panel-sub-row"><span>Fed Stance</span><span class="val">${fedStance}</span></div>
-      <div class="panel-sub-row"><span>FOMC</span><span class="val" style="color:${fomcDays!==null?'var(--amber)':'var(--green2)'}">${fomcDays!==null?`IN ${fomcDays}D`:'CLEAR'}</span></div>
+      <div class="panel-sub-row"><span>10Y Yield</span><span class="val">${mc.tnx != null ? mc.tnx.toFixed(2) + '%' : '--'}</span></div>
+      <div class="panel-sub-row"><span>DXY</span><span class="val">${mc.dxy != null ? mc.dxy.toFixed(1) : '--'}</span></div>
+      <div class="panel-sub-row"><span>Dollar Trend</span><span class="val">${mc.dxy_trend || '--'}</span></div>
+      <div class="panel-sub-row"><span>Fed Stance</span><span class="val">${mc.fed_stance || '--'}</span></div>
+      <div class="panel-sub-row"><span>FOMC</span><span class="val" style="color:${mc.fomc_days != null ? 'var(--amber)' : 'var(--green2)'}">${mc.fomc_days != null ? 'IN ' + mc.fomc_days + 'D' : 'CLEAR'}</span></div>
     </div>
-    <div class="panel-status ${statusClass}">${statusText}</div>`;
+    <div class="panel-status ${statusClass(mc.status)}">${mc.status}</div>`;
 }
 
-function renderHeatmap(sectorCloses) {
-  const perfs = SECTORS.map(sym => {
-    const closes = sectorCloses[sym];
-    if (!closes || closes.length < 6) return {sym, p: null, above50: null};
-    const p = pctChange(closes, 5);
-    const price = closes[closes.length-1];
-    const sma50 = calcSMA(closes, 50);
-    const above50 = sma50 ? price > sma50 : null;
-    return {sym, p, above50};
-  });
-  const validPerfs = perfs.filter(x=>x.p!==null);
-  const maxAbs = Math.max(...validPerfs.map(x=>Math.abs(x.p)), 1);
-
+function renderHeatmap(sectors) {
+  if (!sectors || !sectors.length) return;
+  const maxAbs = Math.max(...sectors.map(s => Math.abs(s.change_pct || 0)), 0.1);
   let html = '';
-  for (const {sym, p, above50} of perfs) {
-    const pStr = p !== null ? (p>=0?'+':'')+p.toFixed(2)+'%' : '[N/A]';
-    const pct = p !== null ? Math.abs(p)/maxAbs*100 : 0;
-    const color = p === null ? '#333' : p >= 0 ? `rgba(0,230,118,${0.3+0.7*Math.abs(p)/maxAbs})` : `rgba(255,23,68,${0.3+0.7*Math.abs(p)/maxAbs})`;
-    const smaLabel = above50 === null ? '' : above50 ? 'ABOVE 50D' : 'BELOW 50D';
-    const smaColor = above50 ? 'var(--green2)' : 'var(--red)';
+  for (const s of sectors) {
+    const p = s.change_pct;
+    const pStr = p != null ? (p >= 0 ? '+' : '') + p.toFixed(2) + '%' : '[N/A]';
+    const pct = p != null ? Math.abs(p) / maxAbs * 100 : 0;
+    const color = p == null ? '#333' : p >= 0 ? `rgba(0,230,118,${0.3 + 0.7 * Math.abs(p) / maxAbs})` : `rgba(255,23,68,${0.3 + 0.7 * Math.abs(p) / maxAbs})`;
+    const smaLabel = s.above_50d ? 'ABOVE 50D' : 'BELOW 50D';
+    const smaColor = s.above_50d ? 'var(--green2)' : 'var(--red)';
     html += `<div class="sector-row">
-      <div class="sector-sym">${sym}</div>
+      <div class="sector-sym">${s.sym}</div>
       <div class="sector-bar-wrap"><div class="sector-bar" style="width:${pct}%;background:${color}"></div></div>
-      <div class="sector-pct" style="color:${p===null?'var(--muted)':p>=0?'var(--green2)':'var(--red)'}">${pStr}</div>
+      <div class="sector-pct" style="color:${p == null ? 'var(--muted)' : p >= 0 ? 'var(--green2)' : 'var(--red)'}">${pStr}</div>
       <div class="sector-sma" style="color:${smaColor}">${smaLabel}</div>
     </div>`;
   }
   document.getElementById('heatmap-rows').innerHTML = html;
 }
 
-function renderScoreBreakdown(catScores, mqs) {
+function renderScoreBreakdown(scores, mqs) {
   const cats = [
-    {name:'VOLATILITY', weight:0.25, score: catScores.vol},
-    {name:'MOMENTUM',   weight:0.25, score: catScores.mom},
-    {name:'TREND',      weight:0.20, score: catScores.trend},
-    {name:'BREADTH',    weight:0.20, score: catScores.breadth},
-    {name:'MACRO',      weight:0.10, score: catScores.macro},
+    {name:'VOLATILITY', weight:0.25, score: scores.volatility.score},
+    {name:'MOMENTUM',   weight:0.25, score: scores.momentum.score},
+    {name:'TREND',      weight:0.20, score: scores.trend.score},
+    {name:'BREADTH',    weight:0.20, score: scores.breadth.score},
+    {name:'MACRO',      weight:0.10, score: scores.macro.score},
   ];
   let html = '';
   for (const {name, weight, score} of cats) {
     const contrib = (score * weight).toFixed(1);
-    const barW = score;
-    const barColor = score>=75?'var(--green2)':score>=55?'var(--amber)':'var(--red)';
+    const barColor = score >= 75 ? 'var(--green2)' : score >= 55 ? 'var(--amber)' : 'var(--red)';
     html += `<tr>
       <td>${name}</td>
       <td style="color:var(--muted)">${(weight*100).toFixed(0)}%</td>
       <td>${score}</td>
       <td>${contrib}</td>
-      <td class="score-bar-cell"><div class="score-bar-bg"><div class="score-bar-fill" style="width:${barW}%;background:${barColor}"></div></div></td>
+      <td class="score-bar-cell"><div class="score-bar-bg"><div class="score-bar-fill" style="width:${score}%;background:${barColor}"></div></div></td>
     </tr>`;
   }
-  const mqsColor = mqs>=80?'var(--green2)':mqs>=60?'var(--amber)':'var(--red)';
+  const mqsColor = mqs >= 80 ? 'var(--green2)' : mqs >= 60 ? 'var(--amber)' : 'var(--red)';
   html += `<tr class="score-total">
     <td colspan="2">MARKET QUALITY SCORE</td>
     <td style="color:${mqsColor}">${mqs.toFixed(1)}</td>
@@ -793,182 +437,108 @@ function renderScoreBreakdown(catScores, mqs) {
   document.getElementById('score-tbody').innerHTML = html;
 }
 
-function generateAnalysis(catScores, mqs, ewScore, sectorCloses, vixPrice, rsi) {
-  const perfs = SECTORS.map(sym => {
-    const closes = sectorCloses[sym];
-    if (!closes || closes.length < 6) return null;
-    return {sym, p: pctChange(closes, 5)};
-  }).filter(x=>x&&x.p!==null);
-  perfs.sort((a,b)=>b.p-a.p);
-  const topSectors = perfs.slice(0,2).map(x=>SECTOR_NAMES[x.sym]||x.sym).join(' and ');
-  const botSectors = perfs.slice(-2).map(x=>SECTOR_NAMES[x.sym]||x.sym).join(' and ');
-
-  const vixDesc = vixPrice !== null ? (vixPrice < 16 ? 'low volatility' : vixPrice < 22 ? 'moderate volatility' : vixPrice < 30 ? 'elevated volatility' : 'extreme fear conditions') : 'mixed volatility';
-  const breadthDesc = catScores.breadth >= 75 ? 'broad market participation' : catScores.breadth >= 55 ? 'mixed breadth with selective strength' : 'narrow leadership and weakening breadth';
-  const rsiDesc = rsi !== null ? (rsi >= 65 ? 'overbought conditions' : rsi >= 50 ? 'healthy momentum' : rsi >= 40 ? 'weakening momentum' : 'oversold conditions') : 'neutral momentum';
-
-  const ts = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false});
-
-  let line1, line2, line3;
-  if (mqs >= 80) {
-    line1 = `Strong trend environment with ${breadthDesc} and ${vixDesc}.`;
-    line2 = `Sector leadership concentrated in ${topSectors}. RSI showing ${rsiDesc}.`;
-    line3 = `VERDICT: Favor full-size swing trades with defined risk. Press winners.`;
-  } else if (mqs >= 60) {
-    line1 = `Mixed market conditions with ${vixDesc}. Trend structure ${catScores.trend>=55?'holding':'deteriorating'}.`;
-    line2 = `${breadthDesc.charAt(0).toUpperCase()+breadthDesc.slice(1)}. Rotation favoring ${topSectors} over ${botSectors}.`;
-    line3 = `VERDICT: Reduce position sizing to 50%. A+ setups only. ${ewScore>=65?'Execution window is open.':'Wait for cleaner entry signals.'}`;
-  } else {
-    line1 = `Elevated risk environment. ${vixDesc.charAt(0).toUpperCase()+vixDesc.slice(1)} with ${breadthDesc}.`;
-    line2 = `Trend structure showing weakness across most sectors. ${catScores.macro<45?'Macro headwinds (yields/dollar) adding pressure.':''}`;
-    line3 = `VERDICT: Capital preservation mode. Avoid new swing entries. Reduce exposure and wait for regime reset.`;
-  }
-
-  const text = `> TERMINAL ANALYSIS [${ts}]\n> ─────────────────────────────────────────────────\n> ${line1}\n> ${line2}\n> ${line3}\n> ─────────────────────────────────────────────────\n> MQS: ${mqs.toFixed(1)}% | EWS: ${ewScore}% | MODE: ${currentMode.toUpperCase()}`;
-  document.getElementById('terminal-text').innerHTML = text + '<span id="terminal-cursor"></span>';
-}
-
-function updateTicker(prices, changes) {
-  const items = [
-    {sym:'SPY', ...prices.spy},
-    {sym:'QQQ', ...prices.qqq},
-    {sym:'VIX', ...prices.vix},
-    {sym:'TNX', ...prices.tnx},
-    {sym:'DXY', ...prices.dxy},
-    ...SECTORS.map(s => ({sym:s, ...prices[s.toLowerCase()]}))
-  ];
+function updateTicker(tickerArr) {
+  if (!tickerArr || !tickerArr.length) return;
   let html = '';
-  for (const item of items) {
-    if (!item || item.price === undefined) continue;
-    const p = item.price !== null ? item.price.toFixed(2) : '--';
-    const c = item.change !== null && item.change !== undefined ? (item.change >= 0 ? '+' : '') + item.change.toFixed(2) + '%' : '';
-    const cls = item.change >= 0 ? 'pos' : 'neg';
-    html += `<span class="tick-item"><span class="sym">${item.sym}</span> <span class="val">${p}</span> <span class="chg ${cls}">${c}</span></span>`;
+  for (const item of tickerArr) {
+    if (!item || item.price == null) continue;
+    const p = item.price.toFixed(2);
+    const chg = item.change_pct != null ? (item.change_pct >= 0 ? '+' : '') + item.change_pct.toFixed(2) + '%' : '';
+    const cls = item.change_pct != null ? (item.change_pct >= 0 ? 'pos' : 'neg') : '';
+    html += `<span class="tick-item"><span class="sym">${item.sym}</span> <span class="val">${p}</span> <span class="chg ${cls}">${chg}</span></span>`;
   }
-  // Duplicate for seamless loop
   const full = html + html;
-  document.getElementById('ticker-content').outerHTML = `<span id="ticker-inner">${full}</span>`;
+  document.getElementById('ticker-inner').innerHTML = full;
 }
 
 // ─── MAIN REFRESH ────────────────────────────────────────────────────────────
 async function refresh() {
   setStatus('updating');
-  const fomcDays = checkFOMC();
-  const modeAdj = currentMode === 'day' ? -2 : 0;
+  const data = await loadSIBT();
+  if (!data) {
+    setStatus('stale');
+    document.getElementById('last-updated').textContent = 'fetch failed';
+    return;
+  }
 
-  // Step 1: Parallel — Finnhub quotes + SPY/QQQ Polygon history
-  const [quotes, spyClosesRaw, qqqClosesRaw] = await Promise.all([
-    fetchAllQuotes(),
-    fetchPolygonHistory('SPY'),
-    fetchPolygonHistory('QQQ'),
-  ]);
+  // FOMC alert
+  const banner = document.getElementById('alert-banner');
+  if (data.fomc_alert && data.fomc_alert.active) {
+    banner.style.display = 'block';
+    banner.textContent = data.fomc_alert.text;
+  } else {
+    banner.style.display = 'none';
+  }
 
-  // Step 2: Sector history (Polygon grouped, sequential with 350ms gaps)
-  const sectorCloses = await fetchSectorHistory(quotes);
+  // Hero
+  renderDecision(data.mqs);
+  updateGauge(data.mqs);
+  document.getElementById('ew-score').textContent = data.ews;
 
-  // Patch last close with Finnhub real-time
-  const spyCloses = [...spyClosesRaw];
-  const qqqCloses = [...qqqClosesRaw];
-  if (quotes.SPY && quotes.SPY.c && spyCloses.length) spyCloses[spyCloses.length-1] = quotes.SPY.c;
-  if (quotes.QQQ && quotes.QQQ.c && qqqCloses.length) qqqCloses[qqqCloses.length-1] = quotes.QQQ.c;
+  // Panels
+  const s = data.scores;
+  renderVolPanel(s.volatility);
+  renderTrendPanel(s.trend);
+  renderBreadthPanel(s.breadth);
+  renderMomentumPanel(s.momentum);
+  renderMacroPanel(s.macro);
 
-  // VIX: VIXY * 3.5 ≈ VIX
-  const vixPrice = quotes.VIXY && quotes.VIXY.c ? +(quotes.VIXY.c * 3.5).toFixed(2) : null;
-  const vixCloses = vixPrice ? Array(20).fill(vixPrice) : [];
+  // Heatmap + Breakdown
+  renderHeatmap(data.sectors);
+  renderScoreBreakdown(s, data.mqs);
 
-  // TNX and DXY from proxy ETFs
-  const tnxPrice = tltToTNX(quotes.TLT ? quotes.TLT.c : null);
-  const dxyPrice = uupToDXY(quotes.UUP ? quotes.UUP.c : null);
+  // Terminal
+  document.getElementById('terminal-text').innerHTML = (data.terminal_text || '').replace(/\n/g, '\n') + '<span id="terminal-cursor"></span>';
 
+  // Ticker
+  updateTicker(data.ticker);
 
-  // Score
-  const volScore    = scoreVolatility(vixPrice, vixCloses, modeAdj);
-  const trendScore  = scoreTrend(spyCloses, qqqCloses, modeAdj);
-  const breadthScore= scoreBreadth(sectorCloses);
-  const momScore    = scoreMomentum(sectorCloses);
-  const macroScore  = scoreMacro(tnxPrice, dxyPrice, fomcDays);
-  const ewScore     = scoreExecutionWindow(spyCloses, vixCloses, sectorCloses);
-
-  const mqs = (volScore*0.25) + (trendScore*0.20) + (breadthScore*0.20) + (momScore*0.25) + (macroScore*0.10);
-  const catScores = {vol:volScore, trend:trendScore, breadth:breadthScore, mom:momScore, macro:macroScore};
-
-  // Ticker — all from Finnhub real-time quotes
-  const tickerPrices = {
-    spy: {price: quotes.SPY && quotes.SPY.c, change: quotes.SPY && quotes.SPY.dp},
-    qqq: {price: quotes.QQQ && quotes.QQQ.c, change: quotes.QQQ && quotes.QQQ.dp},
-    vix: {price: vixPrice, change: null},
-    tnx: {price: tnxPrice, change: null},
-    dxy: {price: dxyPrice, change: null},
-  };
-  SECTORS.forEach(s => {
-    tickerPrices[s.toLowerCase()] = {
-      price: (quotes[s] && quotes[s].c) || null,
-      change: (quotes[s] && quotes[s].dp) || null
-    };
-  });
-
-  // Render everything
-  renderDecision(mqs);
-  updateGauge(mqs);
-  document.getElementById('gauge-pct').textContent = Math.round(mqs);
-  document.getElementById('ew-score').textContent = ewScore;
-
-  const rsi = calcRSI(spyCloses);
-  renderVolPanel(vixPrice, vixCloses, volScore);
-  renderTrendPanel(spyCloses, qqqCloses, trendScore);
-  renderBreadthPanel(sectorCloses, breadthScore);
-  renderMomentumPanel(sectorCloses, momScore);
-  renderMacroPanel(tnxPrice, dxyPrice, fomcDays, macroScore);
-  renderHeatmap(sectorCloses);
-  renderScoreBreakdown(catScores, mqs);
-  generateAnalysis(catScores, mqs, ewScore, sectorCloses, vixPrice, rsi);
-  updateTicker(tickerPrices, {});
-
+  // Timestamp
   lastFetch = Date.now();
+  const dataAge = Math.round((Date.now() - new Date(data.generated).getTime()) / 60000);
   setStatus('live');
-  startUpdateCounter();
+  startUpdateCounter(dataAge);
 }
 
 function setStatus(s) {
   const dot = document.getElementById('status-dot');
   const txt = document.getElementById('status-text');
   if (s === 'live') { dot.className = 'status-dot live'; txt.textContent = 'LIVE'; }
+  else if (s === 'stale') { dot.className = 'status-dot'; txt.textContent = 'STALE'; dot.style.background = 'var(--red)'; }
   else { dot.className = 'status-dot'; txt.textContent = 'UPDATING'; }
 }
 
-let counterInterval = null;
-function startUpdateCounter() {
+function startUpdateCounter(initialAge) {
   if (counterInterval) clearInterval(counterInterval);
+  let age = initialAge || 0;
   counterInterval = setInterval(() => {
-    if (!lastFetch) return;
-    const sec = Math.round((Date.now() - lastFetch) / 1000);
-    document.getElementById('last-updated').textContent = `updated ${sec}s ago`;
-    if (Date.now() - lastFetch > STALE_THRESHOLD) {
-      document.getElementById('last-updated').style.color = 'var(--amber)';
-    }
-  }, 1000);
+    age++;
+    document.getElementById('last-updated').textContent = `data ${age}m old`;
+    if (age > 60) document.getElementById('last-updated').style.color = 'var(--amber)';
+  }, 60000);
+  document.getElementById('last-updated').textContent = `data ${age}m old`;
 }
 
 function manualRefresh() {
-  if (refreshTimer) clearTimeout(refreshTimer);
-  refresh().then(() => {
-    refreshTimer = setInterval(refresh, REFRESH_INTERVAL);
-  });
+  if (refreshTimer) clearInterval(refreshTimer);
+  refresh().then(() => { refreshTimer = setInterval(refresh, REFRESH_INTERVAL); });
 }
 
 function setMode(mode) {
   currentMode = mode;
-  document.getElementById('btn-swing').className = 'mode-btn' + (mode==='swing'?' active':'');
-  document.getElementById('btn-day').className = 'mode-btn' + (mode==='day'?' active':'');
-  refresh();
+  document.getElementById('btn-swing').className = 'mode-btn' + (mode === 'swing' ? ' active' : '');
+  document.getElementById('btn-day').className = 'mode-btn' + (mode === 'day' ? ' active' : '');
+  // Re-render decision badge with mode-adjusted thresholds (no re-fetch needed)
+  const val = parseFloat(document.getElementById('mqs-val').textContent);
+  if (!isNaN(val)) renderDecision(val);
 }
 
-// ─── BOOT ────────────────────────────────────────────────────────────────────
+// ─── BOOT ─────────────────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
-  checkFOMC();
   refresh();
   refreshTimer = setInterval(refresh, REFRESH_INTERVAL);
 });
+
 </script>
 </body>
 </html>
