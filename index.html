@@ -1,0 +1,928 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Should I Be Trading? | Bloomberg Terminal</title>
+<style>
+  :root {
+    --bg: #000814;
+    --bg2: #050f1e;
+    --bg3: #0a1628;
+    --border: #1a2a3a;
+    --green: #00ff41;
+    --green2: #00e676;
+    --red: #ff1744;
+    --amber: #ffab00;
+    --muted: #8888aa;
+    --white: #c8d8e8;
+    --font: 'Courier New', Courier, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--green); font-family: var(--font); font-size: 13px; min-height: 100vh; overflow-x: hidden; }
+
+  /* TICKER BAR */
+  #ticker-bar {
+    background: #000;
+    border-bottom: 1px solid var(--border);
+    padding: 6px 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    overflow: hidden;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  #ticker-status { flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-right: 1px solid var(--border); white-space: nowrap; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); animation: pulse 1.5s infinite; }
+  .status-dot.live { background: var(--green2); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  #ticker-scroll { flex: 1; overflow: hidden; white-space: nowrap; }
+  #ticker-inner { display: inline-block; animation: scroll 60s linear infinite; }
+  @keyframes scroll { 0%{transform:translateX(0)} 100%{transform:translateX(-50%)} }
+  .tick-item { display: inline-block; margin: 0 18px; font-size: 12px; }
+  .tick-item .sym { color: var(--muted); }
+  .tick-item .val { color: var(--white); margin: 0 3px; }
+  .tick-item .chg.pos { color: var(--green2); }
+  .tick-item .chg.neg { color: var(--red); }
+  #refresh-btn { flex-shrink: 0; padding: 3px 10px; background: transparent; border: 1px solid var(--border); color: var(--muted); font-family: var(--font); font-size: 11px; cursor: pointer; margin-right: 12px; }
+  #refresh-btn:hover { border-color: var(--green); color: var(--green); }
+  #last-updated { flex-shrink: 0; color: var(--muted); font-size: 11px; padding-right: 8px; white-space: nowrap; }
+
+  /* ALERT BANNER */
+  #alert-banner {
+    background: var(--amber);
+    color: #000;
+    text-align: center;
+    padding: 8px;
+    font-weight: bold;
+    font-size: 13px;
+    display: none;
+  }
+
+  /* MAIN LAYOUT */
+  .container { max-width: 1400px; margin: 0 auto; padding: 16px; }
+
+  /* MODE TOGGLE */
+  #mode-toggle { display: flex; gap: 8px; margin-bottom: 16px; }
+  .mode-btn { padding: 5px 18px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-family: var(--font); font-size: 12px; cursor: pointer; }
+  .mode-btn.active { border-color: var(--green); color: var(--green); background: rgba(0,255,65,0.05); }
+
+  /* HERO PANEL */
+  #hero { display: flex; align-items: center; justify-content: center; gap: 48px; padding: 28px; border: 1px solid var(--border); background: var(--bg2); margin-bottom: 16px; flex-wrap: wrap; }
+  #decision-badge { text-align: center; }
+  #decision-text { font-size: 72px; font-weight: bold; line-height: 1; letter-spacing: 4px; }
+  #decision-text.yes { color: var(--green2); text-shadow: 0 0 20px var(--green2); }
+  #decision-text.caution { color: var(--amber); text-shadow: 0 0 20px var(--amber); }
+  #decision-text.no { color: var(--red); text-shadow: 0 0 20px var(--red); }
+  #decision-sub { color: var(--muted); font-size: 11px; margin-top: 6px; letter-spacing: 2px; }
+  #mqs-label { color: var(--white); font-size: 15px; margin-top: 6px; }
+
+  /* SVG GAUGE */
+  #gauge-wrap { position: relative; width: 160px; height: 160px; }
+  #gauge-svg { width: 160px; height: 160px; transform: rotate(-90deg); }
+  #gauge-label { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); text-align: center; }
+  #gauge-pct { font-size: 28px; color: var(--white); }
+  #gauge-sub { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+  /* EW SCORE */
+  #ew-block { text-align: center; }
+  #ew-score { font-size: 42px; color: var(--amber); }
+  #ew-label { font-size: 11px; color: var(--muted); letter-spacing: 1px; margin-top: 4px; }
+
+  /* GRID PANELS */
+  .panels-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .panel { border: 1px solid var(--border); background: var(--bg2); padding: 14px; }
+  .panel-title { color: var(--muted); font-size: 10px; letter-spacing: 2px; text-transform: uppercase; border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 10px; }
+  .panel-main { font-size: 22px; color: var(--white); margin-bottom: 4px; }
+  .panel-dir { font-size: 18px; margin-left: 6px; }
+  .panel-dir.up { color: var(--green2); }
+  .panel-dir.down { color: var(--red); }
+  .panel-dir.flat { color: var(--amber); }
+  .panel-subs { margin-top: 8px; }
+  .panel-sub-row { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-bottom: 3px; }
+  .panel-sub-row .val { color: var(--white); }
+  .panel-status { display: inline-block; font-size: 10px; padding: 2px 8px; border: 1px solid; margin-top: 8px; letter-spacing: 1px; }
+  .status-healthy { border-color: var(--green2); color: var(--green2); }
+  .status-neutral { border-color: var(--amber); color: var(--amber); }
+  .status-caution { border-color: var(--amber); color: var(--amber); }
+  .status-riskoff { border-color: var(--red); color: var(--red); }
+
+  /* SECTOR HEATMAP */
+  #heatmap { border: 1px solid var(--border); background: var(--bg2); padding: 14px; margin-bottom: 16px; }
+  #heatmap .panel-title { display: flex; justify-content: space-between; }
+  .sector-row { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; }
+  .sector-sym { width: 40px; color: var(--muted); font-size: 11px; flex-shrink: 0; }
+  .sector-bar-wrap { flex: 1; height: 18px; background: #0a1628; position: relative; }
+  .sector-bar { height: 100%; min-width: 2px; transition: width 0.5s; }
+  .sector-pct { width: 60px; text-align: right; font-size: 11px; flex-shrink: 0; }
+  .sector-sma { width: 90px; text-align: right; font-size: 10px; color: var(--muted); flex-shrink: 0; }
+
+  /* SCORE BREAKDOWN */
+  #score-breakdown { border: 1px solid var(--border); background: var(--bg2); padding: 14px; margin-bottom: 16px; }
+  .score-table { width: 100%; border-collapse: collapse; }
+  .score-table th { color: var(--muted); font-size: 10px; letter-spacing: 1px; text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .score-table td { padding: 5px 8px; font-size: 12px; border-bottom: 1px solid #0d1e2e; }
+  .score-bar-cell { width: 200px; }
+  .score-bar-bg { height: 8px; background: #0a1628; }
+  .score-bar-fill { height: 8px; background: var(--green2); transition: width 0.5s; }
+  .score-total td { color: var(--white); border-top: 1px solid var(--border); font-weight: bold; }
+
+  /* TERMINAL ANALYSIS */
+  #terminal-analysis { border: 1px solid var(--border); background: #000; padding: 14px; margin-bottom: 16px; }
+  #terminal-analysis .panel-title { color: var(--green); }
+  #terminal-text { color: var(--green); font-size: 13px; line-height: 1.7; white-space: pre-wrap; }
+  #terminal-cursor { display: inline-block; width: 8px; height: 14px; background: var(--green); margin-left: 2px; animation: blink 1s infinite; vertical-align: middle; }
+  @keyframes blink { 0%,49%{opacity:1} 50%,100%{opacity:0} }
+
+  /* SKELETON */
+  .skeleton { background: linear-gradient(90deg, #0a1628 25%, #162438 50%, #0a1628 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; height: 14px; border-radius: 2px; margin: 4px 0; }
+  @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+
+  /* STALE WARNING */
+  .stale-badge { font-size: 10px; color: var(--amber); border: 1px solid var(--amber); padding: 1px 6px; margin-left: 8px; }
+
+  /* FOOTER */
+  #footer { border-top: 1px solid var(--border); padding: 10px; text-align: center; color: var(--muted); font-size: 10px; letter-spacing: 1px; }
+
+  /* RESPONSIVE */
+  @media (max-width: 700px) {
+    #hero { gap: 24px; padding: 18px; }
+    #decision-text { font-size: 48px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- TICKER BAR -->
+<div id="ticker-bar">
+  <div id="ticker-status">
+    <div class="status-dot" id="status-dot"></div>
+    <span id="status-text" style="font-size:11px;color:var(--muted)">UPDATING</span>
+  </div>
+  <div id="ticker-scroll">
+    <div id="ticker-inner"><span id="ticker-content" style="color:var(--muted);font-size:11px">LOADING MARKET DATA...</span></div>
+  </div>
+  <div id="last-updated">--</div>
+  <button id="refresh-btn" onclick="manualRefresh()">[REFRESH]</button>
+</div>
+
+<!-- ALERT BANNER -->
+<div id="alert-banner"></div>
+
+<div class="container">
+
+  <!-- MODE TOGGLE -->
+  <div id="mode-toggle">
+    <button class="mode-btn active" id="btn-swing" onclick="setMode('swing')">[ SWING MODE ]</button>
+    <button class="mode-btn" id="btn-day" onclick="setMode('day')">[ DAY MODE ]</button>
+  </div>
+
+  <!-- HERO -->
+  <div id="hero">
+    <div id="decision-badge">
+      <div id="decision-text" class="caution">---</div>
+      <div id="decision-sub">SHOULD I BE TRADING?</div>
+      <div id="mqs-label">Market Quality Score: <span id="mqs-val">--.-</span>%</div>
+    </div>
+    <div id="gauge-wrap">
+      <svg id="gauge-svg" viewBox="0 0 160 160">
+        <circle cx="80" cy="80" r="65" fill="none" stroke="#0a1628" stroke-width="14"/>
+        <circle id="gauge-arc" cx="80" cy="80" r="65" fill="none" stroke="#00e676" stroke-width="14"
+          stroke-dasharray="0 408" stroke-linecap="butt"/>
+      </svg>
+      <div id="gauge-label">
+        <div id="gauge-pct">--</div>
+        <div id="gauge-sub">MQS</div>
+      </div>
+    </div>
+    <div id="ew-block">
+      <div id="ew-score">--</div>
+      <div id="ew-label">EXECUTION WINDOW<br>SCORE</div>
+    </div>
+  </div>
+
+  <!-- PANELS -->
+  <div class="panels-grid" id="panels-grid">
+    <div class="panel" id="panel-vol">
+      <div class="panel-title">VOLATILITY</div>
+      <div class="skeleton"></div><div class="skeleton" style="width:60%"></div>
+    </div>
+    <div class="panel" id="panel-trend">
+      <div class="panel-title">TREND &amp; STRUCTURE</div>
+      <div class="skeleton"></div><div class="skeleton" style="width:60%"></div>
+    </div>
+    <div class="panel" id="panel-breadth">
+      <div class="panel-title">BREADTH</div>
+      <div class="skeleton"></div><div class="skeleton" style="width:60%"></div>
+    </div>
+    <div class="panel" id="panel-mom">
+      <div class="panel-title">MOMENTUM</div>
+      <div class="skeleton"></div><div class="skeleton" style="width:60%"></div>
+    </div>
+    <div class="panel" id="panel-macro">
+      <div class="panel-title">MACRO / LIQUIDITY</div>
+      <div class="skeleton"></div><div class="skeleton" style="width:60%"></div>
+    </div>
+  </div>
+
+  <!-- SECTOR HEATMAP -->
+  <div id="heatmap">
+    <div class="panel-title">SECTOR HEATMAP <span style="color:var(--muted);font-size:10px">5-DAY PERFORMANCE</span></div>
+    <div id="heatmap-rows"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>
+  </div>
+
+  <!-- SCORE BREAKDOWN -->
+  <div id="score-breakdown">
+    <div class="panel-title">SCORING BREAKDOWN</div>
+    <table class="score-table">
+      <thead>
+        <tr><th>CATEGORY</th><th>WEIGHT</th><th>SCORE</th><th>CONTRIBUTION</th><th class="score-bar-cell">VISUAL</th></tr>
+      </thead>
+      <tbody id="score-tbody">
+        <tr><td colspan="5"><div class="skeleton"></div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- TERMINAL ANALYSIS -->
+  <div id="terminal-analysis">
+    <div class="panel-title">TERMINAL ANALYSIS</div>
+    <div id="terminal-text">&gt; CONNECTING TO MARKET DATA FEED...<span id="terminal-cursor"></span></div>
+  </div>
+
+</div>
+
+<div id="footer">SHOULD I BE TRADING? · APPFORGELABS · DATA: YAHOO FINANCE · NOT FINANCIAL ADVICE</div>
+
+<script>
+// ─── CONFIG ────────────────────────────────────────────────────────────────
+const PROXY = 'https://api.allorigins.win/raw?url=';
+const PROXY2 = 'https://corsproxy.io/?url=';
+const REFRESH_INTERVAL = 45000;
+const STALE_THRESHOLD = 300000;
+
+const SYMBOLS = {
+  spy: 'SPY', qqq: 'QQQ', vix: '^VIX', dxy: 'DX-Y.NYB', tnx: '^TNX',
+  xlk:'XLK', xlf:'XLF', xle:'XLE', xlv:'XLV', xli:'XLI',
+  xly:'XLY', xlp:'XLP', xlu:'XLU', xlb:'XLB', xlre:'XLRE', xlc:'XLC'
+};
+
+const SECTORS = ['XLK','XLF','XLE','XLV','XLI','XLY','XLP','XLU','XLB','XLRE','XLC'];
+const SECTOR_NAMES = {
+  XLK:'Technology', XLF:'Financials', XLE:'Energy', XLV:'Healthcare',
+  XLI:'Industrials', XLY:'Cons. Disc.', XLP:'Cons. Staples', XLU:'Utilities',
+  XLB:'Materials', XLRE:'Real Estate', XLC:'Comm. Services'
+};
+
+// FOMC 2026 dates (±3 day window triggers alert)
+const FOMC_DATES = [
+  '2026-01-28','2026-01-29',
+  '2026-03-18','2026-03-19',
+  '2026-05-06','2026-05-07',
+  '2026-06-17','2026-06-18',
+  '2026-07-29','2026-07-30',
+  '2026-09-16','2026-09-17',
+  '2026-11-04','2026-11-05',
+  '2026-12-15','2026-12-16'
+];
+
+let currentMode = 'swing';
+let lastFetch = null;
+let marketData = {};
+let scores = {};
+let refreshTimer = null;
+let updateTimer = null;
+
+// ─── DATA FETCHING ──────────────────────────────────────────────────────────
+async function fetchYahoo(symbol, range='5d', interval='1d') {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`;
+  const proxied = PROXY + encodeURIComponent(url);
+  const proxied2 = PROXY2 + encodeURIComponent(url);
+  try {
+    let res = await fetch(proxied, {signal: AbortSignal.timeout(8000)});
+    if (!res.ok) throw new Error('allorigins failed');
+    return await res.json();
+  } catch(e) {
+    try {
+      let res = await fetch(proxied2, {signal: AbortSignal.timeout(8000)});
+      if (!res.ok) throw new Error('corsproxy failed');
+      return await res.json();
+    } catch(e2) { return null; }
+  }
+}
+
+function extractPrice(data) {
+  try {
+    const r = data.chart.result[0];
+    const q = r.indicators.quote[0];
+    const closes = q.close.filter(x => x !== null);
+    return closes[closes.length - 1];
+  } catch(e) { return null; }
+}
+
+function extractCloses(data, n=null) {
+  try {
+    const q = data.chart.result[0].indicators.quote[0];
+    let closes = q.close.filter(x => x !== null);
+    return n ? closes.slice(-n) : closes;
+  } catch(e) { return []; }
+}
+
+function calcSMA(closes, period) {
+  if (closes.length < period) return null;
+  const slice = closes.slice(-period);
+  return slice.reduce((a,b)=>a+b,0) / period;
+}
+
+function calcRSI(closes, period=14) {
+  if (closes.length < period + 1) return null;
+  let gains = 0, losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const diff = closes[i] - closes[i-1];
+    if (diff > 0) gains += diff; else losses -= diff;
+  }
+  if (losses === 0) return 100;
+  const rs = (gains/period) / (losses/period);
+  return 100 - (100/(1+rs));
+}
+
+function pctChange(closes, days=5) {
+  if (closes.length < days+1) return null;
+  const old = closes[closes.length-days-1];
+  const now = closes[closes.length-1];
+  return ((now - old) / old) * 100;
+}
+
+// ─── FOMC CHECK ─────────────────────────────────────────────────────────────
+function checkFOMC() {
+  const today = new Date();
+  for (const dateStr of FOMC_DATES) {
+    const fomc = new Date(dateStr + 'T12:00:00');
+    const diff = (fomc - today) / (1000*60*60*24);
+    if (diff >= -1 && diff <= 3) {
+      const days = Math.ceil(diff);
+      const banner = document.getElementById('alert-banner');
+      banner.style.display = 'block';
+      if (days <= 0) {
+        banner.textContent = '⚠️ FOMC MEETING TODAY — ELEVATED VOLATILITY — REDUCE POSITION SIZING';
+      } else {
+        banner.textContent = `⚠️ FOMC MEETING IN ${days} DAY${days>1?'S':''} — PRE-FOMC CAUTION — REDUCE POSITION SIZING`;
+      }
+      return days <= 0 ? 0 : days;
+    }
+  }
+  document.getElementById('alert-banner').style.display = 'none';
+  return null;
+}
+
+// ─── SCORING ENGINE ──────────────────────────────────────────────────────────
+function scoreVolatility(vixPrice, vixCloses, modeAdj=0) {
+  if (vixPrice === null) return 50;
+  const threshold = modeAdj; // day mode subtracts 2 from thresholds
+  let score;
+  const v = vixPrice - threshold;
+  if (v < 15) score = 90 + Math.min(10, (15-v)*2);
+  else if (v < 20) score = 70 + (20-v)*4;
+  else if (v < 25) score = 40 + (25-v)*6;
+  else if (v < 30) score = 15 + (30-v)*5;
+  else score = Math.max(0, 10 - (v-30)*2);
+  score = Math.min(100, Math.max(0, score));
+
+  // 5d slope bonus
+  if (vixCloses.length >= 5) {
+    const slope = vixCloses[vixCloses.length-1] - vixCloses[vixCloses.length-5];
+    if (slope < 0) score = Math.min(100, score + 5);
+    if (slope > 3) score = Math.max(0, score - 10);
+  }
+  return Math.round(score);
+}
+
+function scoreTrend(spyCloses, qqqCloses, modeAdj=0) {
+  if (!spyCloses.length) return 50;
+  const spy = spyCloses[spyCloses.length-1];
+  const sma200 = calcSMA(spyCloses, 200);
+  const sma50 = calcSMA(spyCloses, 50);
+  const sma20 = calcSMA(spyCloses, 20);
+  const qqqSma50 = calcSMA(qqqCloses, 50);
+  const qqq = qqqCloses[qqqCloses.length-1];
+  const rsi = calcRSI(spyCloses);
+
+  let pts = 0;
+  if (sma200 && spy > sma200) pts += 25;
+  if (sma50 && spy > sma50) pts += 20;
+  if (sma20 && spy > sma20) pts += 15;
+  if (qqqSma50 && qqq > qqqSma50) pts += 15;
+
+  if (rsi !== null) {
+    if (rsi >= 50 && rsi <= 70) pts += 25;
+    else if (rsi >= 40 && rsi < 50) pts += 15;
+    else if (rsi >= 30 && rsi < 40) pts += 5;
+    else if (rsi < 30) pts += 10;
+    else if (rsi > 70 && rsi <= 80) pts += 15;
+    else if (rsi > 80) pts += 5;
+  } else pts += 12;
+
+  return Math.min(100, Math.round(pts));
+}
+
+function scoreBreadth(sectorCloses) {
+  // Count sectors above 50d SMA
+  let above = 0;
+  let total = 0;
+  for (const [sym, closes] of Object.entries(sectorCloses)) {
+    if (!closes || closes.length < 50) continue;
+    total++;
+    const price = closes[closes.length-1];
+    const sma50 = calcSMA(closes, 50);
+    if (sma50 && price > sma50) above++;
+  }
+  if (total === 0) return 50;
+  const count = above;
+  if (count >= 9) return Math.round(90 + (count-9)*5);
+  if (count >= 6) return Math.round(60 + (count-6)*10);
+  if (count >= 3) return Math.round(30 + (count-3)*8);
+  return Math.round(count * 8);
+}
+
+function scoreMomentum(sectorCloses) {
+  const perfs = [];
+  for (const sym of SECTORS) {
+    const closes = sectorCloses[sym];
+    if (!closes || closes.length < 6) continue;
+    const p = pctChange(closes, 5);
+    if (p !== null) perfs.push({sym, p});
+  }
+  if (perfs.length < 3) return 50;
+  perfs.sort((a,b) => b.p - a.p);
+  const top3 = perfs.slice(0,3).map(x=>x.p);
+  const bot3 = perfs.slice(-3).map(x=>x.p);
+  const avgTop = top3.reduce((a,b)=>a+b,0)/top3.length;
+  const avgBot = bot3.reduce((a,b)=>a+b,0)/bot3.length;
+  const spread = avgTop - avgBot;
+
+  let score;
+  if (spread > 5) score = 85 + Math.min(15,(spread-5)*3);
+  else if (spread > 3) score = 65 + (spread-3)*10;
+  else if (spread > 1) score = 40 + (spread-1)*12.5;
+  else score = Math.max(10, spread*10);
+
+  // XLK bonus
+  if (perfs.slice(0,3).some(x=>x.sym==='XLK')) score = Math.min(100, score + 5);
+  return Math.round(Math.min(100, Math.max(0, score)));
+}
+
+function scoreMacro(tnxPrice, dxyPrice, fomcDays) {
+  let score = 0;
+  let weight = 0;
+
+  if (tnxPrice !== null) {
+    // TNX comes as decimal*10 from Yahoo sometimes, check magnitude
+    const tnx = tnxPrice > 20 ? tnxPrice/10 : tnxPrice;
+    let s;
+    if (tnx < 3.5) s = 70;
+    else if (tnx <= 4.5) s = 50;
+    else if (tnx <= 5) s = 30;
+    else s = 15;
+    score += s * 0.5;
+    weight += 0.5;
+  }
+
+  if (dxyPrice !== null) {
+    let s;
+    if (dxyPrice < 100) s = 60;
+    else if (dxyPrice <= 104) s = 45;
+    else s = 30;
+    score += s * 0.5;
+    weight += 0.5;
+  }
+
+  let final = weight > 0 ? score / weight : 50;
+  if (fomcDays !== null && fomcDays >= 0) final = Math.max(0, final - 10);
+  return Math.round(Math.min(100, Math.max(0, final)));
+}
+
+function scoreExecutionWindow(spyCloses, vixCloses, sectorCloses) {
+  let score = 0;
+  // SPY 5d momentum
+  if (spyCloses.length >= 6) {
+    const m = pctChange(spyCloses, 5);
+    if (m !== null && m > 0) score += 30;
+    else if (m !== null && m > -1) score += 15;
+  } else score += 15;
+
+  // Sector dispersion
+  const perfs = SECTORS.map(s => {
+    const c = sectorCloses[s];
+    if (!c || c.length < 6) return null;
+    return pctChange(c, 5);
+  }).filter(x=>x!==null);
+  if (perfs.length >= 6) {
+    const max = Math.max(...perfs), min = Math.min(...perfs);
+    const dispersion = max - min;
+    if (dispersion > 8) score += 25;
+    else if (dispersion > 4) score += 15;
+    else score += 5;
+  } else score += 12;
+
+  // RSI in ideal range
+  const rsi = calcRSI(spyCloses);
+  if (rsi !== null) {
+    if (rsi >= 50 && rsi <= 65) score += 25;
+    else if (rsi >= 45 && rsi < 70) score += 15;
+    else score += 5;
+  } else score += 12;
+
+  // VIX falling
+  if (vixCloses.length >= 5) {
+    const slope = vixCloses[vixCloses.length-1] - vixCloses[vixCloses.length-5];
+    if (slope < 0) score += 20;
+    else if (slope < 1) score += 10;
+  } else score += 10;
+
+  return Math.min(100, score);
+}
+
+function getRegime(trendScore, breadthScore, volScore) {
+  if (trendScore >= 60 && breadthScore >= 60) return 'UPTREND';
+  if (trendScore <= 35 || (breadthScore <= 35 && volScore <= 40)) return 'DOWNTREND';
+  return 'CHOP';
+}
+
+// ─── UI RENDERING ────────────────────────────────────────────────────────────
+function updateGauge(pct) {
+  const circumference = 2 * Math.PI * 65;
+  const arc = (pct / 100) * circumference;
+  const el = document.getElementById('gauge-arc');
+  el.setAttribute('stroke-dasharray', `${arc} ${circumference}`);
+  if (pct >= 80) el.setAttribute('stroke', '#00e676');
+  else if (pct >= 60) el.setAttribute('stroke', '#ffab00');
+  else el.setAttribute('stroke', '#ff1744');
+  document.getElementById('gauge-pct').textContent = Math.round(pct);
+}
+
+function renderDecision(mqs) {
+  const dt = document.getElementById('decision-text');
+  const label = document.getElementById('mqs-val');
+  label.textContent = mqs.toFixed(1);
+  dt.className = '';
+  if (mqs >= 80) { dt.textContent = 'YES'; dt.className = 'yes'; }
+  else if (mqs >= 60) { dt.textContent = 'CAUTION'; dt.className = 'caution'; }
+  else { dt.textContent = 'NO'; dt.className = 'no'; }
+}
+
+function getStatusClass(score) {
+  if (score >= 75) return ['HEALTHY','status-healthy'];
+  if (score >= 55) return ['NEUTRAL','status-neutral'];
+  if (score >= 35) return ['CAUTION','status-caution'];
+  return ['RISK-OFF','status-riskoff'];
+}
+
+function renderVolPanel(vixPrice, vixCloses, score) {
+  const trend = vixCloses.length>=5 ? (vixCloses[vixCloses.length-1]-vixCloses[vixCloses.length-5]) : 0;
+  const dir = trend < 0 ? '↓' : trend > 1 ? '↑' : '→';
+  const dirClass = trend < 0 ? 'up' : trend > 0 ? 'down' : 'flat';
+  const [statusText, statusClass] = getStatusClass(score);
+  const vixPct = vixCloses.length >= 252 ? calcVixPercentile(vixCloses) : '--';
+  document.getElementById('panel-vol').innerHTML = `
+    <div class="panel-title">VOLATILITY <span class="stale-badge" style="display:${lastFetch && Date.now()-lastFetch>STALE_THRESHOLD?'inline':'none'}">STALE</span></div>
+    <div class="panel-main">VIX ${vixPrice!==null?vixPrice.toFixed(2):'[N/A]'} <span class="panel-dir ${dirClass}">${dir}</span></div>
+    <div class="panel-subs">
+      <div class="panel-sub-row"><span>5D Trend</span><span class="val">${trend>0?'+':''}${trend.toFixed(2)}</span></div>
+      <div class="panel-sub-row"><span>1Y Percentile</span><span class="val">${vixPct !== '--' ? vixPct+'%' : '--'}</span></div>
+      <div class="panel-sub-row"><span>Score</span><span class="val">${score}/100</span></div>
+    </div>
+    <div class="panel-status ${statusClass}">${statusText}</div>`;
+}
+
+function calcVixPercentile(closes) {
+  const last = closes[closes.length-1];
+  const sorted = [...closes].sort((a,b)=>a-b);
+  const idx = sorted.findIndex(x=>x>=last);
+  return Math.round((idx/sorted.length)*100);
+}
+
+function renderTrendPanel(spyCloses, qqqCloses, score) {
+  const spy = spyCloses.length ? spyCloses[spyCloses.length-1] : null;
+  const sma200 = calcSMA(spyCloses, 200);
+  const sma50 = calcSMA(spyCloses, 50);
+  const sma20 = calcSMA(spyCloses, 20);
+  const rsi = calcRSI(spyCloses);
+  const dir = sma50 && spy ? (spy > sma50 ? '↑' : '↓') : '→';
+  const dirClass = sma50 && spy ? (spy > sma50 ? 'up' : 'down') : 'flat';
+  const regime = score >= 60 ? (score >= 75 ? 'UPTREND' : 'TRENDING') : (score >= 40 ? 'CHOP' : 'DOWNTREND');
+  const [statusText, statusClass] = getStatusClass(score);
+  document.getElementById('panel-trend').innerHTML = `
+    <div class="panel-title">TREND &amp; STRUCTURE</div>
+    <div class="panel-main">SPY ${spy?spy.toFixed(2):'[N/A]'} <span class="panel-dir ${dirClass}">${dir}</span></div>
+    <div class="panel-subs">
+      <div class="panel-sub-row"><span>vs 20d SMA</span><span class="val" style="color:${sma20&&spy?(spy>sma20?'var(--green2)':'var(--red)'):'var(--muted)'}">${sma20&&spy?(spy>sma20?'ABOVE':'BELOW'):'--'}</span></div>
+      <div class="panel-sub-row"><span>vs 50d SMA</span><span class="val" style="color:${sma50&&spy?(spy>sma50?'var(--green2)':'var(--red)'):'var(--muted)'}">${sma50&&spy?(spy>sma50?'ABOVE':'BELOW'):'--'}</span></div>
+      <div class="panel-sub-row"><span>vs 200d SMA</span><span class="val" style="color:${sma200&&spy?(spy>sma200?'var(--green2)':'var(--red)'):'var(--muted)'}">${sma200&&spy?(spy>sma200?'ABOVE':'BELOW'):'--'}</span></div>
+      <div class="panel-sub-row"><span>RSI 14d</span><span class="val">${rsi?rsi.toFixed(1):'--'}</span></div>
+      <div class="panel-sub-row"><span>Regime</span><span class="val">${regime}</span></div>
+    </div>
+    <div class="panel-status ${statusClass}">${statusText}</div>`;
+}
+
+function renderBreadthPanel(sectorCloses, score) {
+  let above50 = 0, total = 0;
+  for (const [sym, closes] of Object.entries(sectorCloses)) {
+    if (!closes || closes.length < 50) continue;
+    total++;
+    const price = closes[closes.length-1];
+    const sma50 = calcSMA(closes, 50);
+    if (sma50 && price > sma50) above50++;
+  }
+  const [statusText, statusClass] = getStatusClass(score);
+  document.getElementById('panel-breadth').innerHTML = `
+    <div class="panel-title">BREADTH</div>
+    <div class="panel-main">${above50}/${total} <span class="panel-dir ${above50>=7?'up':above50>=4?'flat':'down'}">${above50>=7?'↑':above50>=4?'→':'↓'}</span></div>
+    <div class="panel-subs">
+      <div class="panel-sub-row"><span>Sectors above 50d</span><span class="val">${above50} of ${total}</span></div>
+      <div class="panel-sub-row"><span>Breadth Score</span><span class="val">${score}/100</span></div>
+      <div class="panel-sub-row"><span>Interpretation</span><span class="val">${above50>=8?'WIDE':'above50>=5?MIXED':'NARROW'}</span></div>
+    </div>
+    <div class="panel-status ${statusClass}">${statusText}</div>`;
+}
+
+function renderMomentumPanel(sectorCloses, score) {
+  const perfs = [];
+  for (const sym of SECTORS) {
+    const closes = sectorCloses[sym];
+    if (!closes || closes.length < 6) continue;
+    const p = pctChange(closes, 5);
+    if (p !== null) perfs.push({sym, p});
+  }
+  perfs.sort((a,b)=>b.p-a.p);
+  const top1 = perfs[0];
+  const bot1 = perfs[perfs.length-1];
+  const [statusText, statusClass] = getStatusClass(score);
+  document.getElementById('panel-mom').innerHTML = `
+    <div class="panel-title">MOMENTUM</div>
+    <div class="panel-main">Score ${score} <span class="panel-dir ${score>=65?'up':score>=45?'flat':'down'}">${score>=65?'↑':score>=45?'→':'↓'}</span></div>
+    <div class="panel-subs">
+      <div class="panel-sub-row"><span>Top Sector</span><span class="val" style="color:var(--green2)">${top1?top1.sym+' '+top1.p.toFixed(1)+'%':'--'}</span></div>
+      <div class="panel-sub-row"><span>Weak Sector</span><span class="val" style="color:var(--red)">${bot1?bot1.sym+' '+bot1.p.toFixed(1)+'%':'--'}</span></div>
+      <div class="panel-sub-row"><span>Tech Leadership</span><span class="val">${perfs.slice(0,3).some(x=>x.sym==='XLK')?'YES ✓':'NO'}</span></div>
+    </div>
+    <div class="panel-status ${statusClass}">${statusText}</div>`;
+}
+
+function renderMacroPanel(tnxPrice, dxyPrice, fomcDays, score) {
+  const tnxDisplay = tnxPrice !== null ? (tnxPrice > 20 ? (tnxPrice/10).toFixed(2) : tnxPrice.toFixed(2)) : null;
+  const dxyDisplay = dxyPrice !== null ? dxyPrice.toFixed(2) : null;
+  const fedStance = tnxDisplay ? (parseFloat(tnxDisplay) < 3.8 ? 'DOVISH' : parseFloat(tnxDisplay) < 4.5 ? 'NEUTRAL' : 'HAWKISH') : '--';
+  const dxyTrend = dxyDisplay ? (parseFloat(dxyDisplay) < 100 ? 'WEAK ↓' : parseFloat(dxyDisplay) < 104 ? 'NEUTRAL →' : 'STRONG ↑') : '--';
+  const [statusText, statusClass] = getStatusClass(score);
+  document.getElementById('panel-macro').innerHTML = `
+    <div class="panel-title">MACRO / LIQUIDITY</div>
+    <div class="panel-main">10Y ${tnxDisplay||'[N/A]'}% <span class="panel-dir flat">→</span></div>
+    <div class="panel-subs">
+      <div class="panel-sub-row"><span>10Y Yield</span><span class="val">${tnxDisplay||'--'}%</span></div>
+      <div class="panel-sub-row"><span>DXY</span><span class="val">${dxyDisplay||'--'}</span></div>
+      <div class="panel-sub-row"><span>Dollar Trend</span><span class="val">${dxyTrend}</span></div>
+      <div class="panel-sub-row"><span>Fed Stance</span><span class="val">${fedStance}</span></div>
+      <div class="panel-sub-row"><span>FOMC</span><span class="val" style="color:${fomcDays!==null?'var(--amber)':'var(--green2)'}">${fomcDays!==null?`IN ${fomcDays}D`:'CLEAR'}</span></div>
+    </div>
+    <div class="panel-status ${statusClass}">${statusText}</div>`;
+}
+
+function renderHeatmap(sectorCloses) {
+  const perfs = SECTORS.map(sym => {
+    const closes = sectorCloses[sym];
+    if (!closes || closes.length < 6) return {sym, p: null, above50: null};
+    const p = pctChange(closes, 5);
+    const price = closes[closes.length-1];
+    const sma50 = calcSMA(closes, 50);
+    const above50 = sma50 ? price > sma50 : null;
+    return {sym, p, above50};
+  });
+  const validPerfs = perfs.filter(x=>x.p!==null);
+  const maxAbs = Math.max(...validPerfs.map(x=>Math.abs(x.p)), 1);
+
+  let html = '';
+  for (const {sym, p, above50} of perfs) {
+    const pStr = p !== null ? (p>=0?'+':'')+p.toFixed(2)+'%' : '[N/A]';
+    const pct = p !== null ? Math.abs(p)/maxAbs*100 : 0;
+    const color = p === null ? '#333' : p >= 0 ? `rgba(0,230,118,${0.3+0.7*Math.abs(p)/maxAbs})` : `rgba(255,23,68,${0.3+0.7*Math.abs(p)/maxAbs})`;
+    const smaLabel = above50 === null ? '' : above50 ? 'ABOVE 50D' : 'BELOW 50D';
+    const smaColor = above50 ? 'var(--green2)' : 'var(--red)';
+    html += `<div class="sector-row">
+      <div class="sector-sym">${sym}</div>
+      <div class="sector-bar-wrap"><div class="sector-bar" style="width:${pct}%;background:${color}"></div></div>
+      <div class="sector-pct" style="color:${p===null?'var(--muted)':p>=0?'var(--green2)':'var(--red)'}">${pStr}</div>
+      <div class="sector-sma" style="color:${smaColor}">${smaLabel}</div>
+    </div>`;
+  }
+  document.getElementById('heatmap-rows').innerHTML = html;
+}
+
+function renderScoreBreakdown(catScores, mqs) {
+  const cats = [
+    {name:'VOLATILITY', weight:0.25, score: catScores.vol},
+    {name:'MOMENTUM',   weight:0.25, score: catScores.mom},
+    {name:'TREND',      weight:0.20, score: catScores.trend},
+    {name:'BREADTH',    weight:0.20, score: catScores.breadth},
+    {name:'MACRO',      weight:0.10, score: catScores.macro},
+  ];
+  let html = '';
+  for (const {name, weight, score} of cats) {
+    const contrib = (score * weight).toFixed(1);
+    const barW = score;
+    const barColor = score>=75?'var(--green2)':score>=55?'var(--amber)':'var(--red)';
+    html += `<tr>
+      <td>${name}</td>
+      <td style="color:var(--muted)">${(weight*100).toFixed(0)}%</td>
+      <td>${score}</td>
+      <td>${contrib}</td>
+      <td class="score-bar-cell"><div class="score-bar-bg"><div class="score-bar-fill" style="width:${barW}%;background:${barColor}"></div></div></td>
+    </tr>`;
+  }
+  const mqsColor = mqs>=80?'var(--green2)':mqs>=60?'var(--amber)':'var(--red)';
+  html += `<tr class="score-total">
+    <td colspan="2">MARKET QUALITY SCORE</td>
+    <td style="color:${mqsColor}">${mqs.toFixed(1)}</td>
+    <td style="color:${mqsColor}">${mqs.toFixed(1)}</td>
+    <td class="score-bar-cell"><div class="score-bar-bg"><div class="score-bar-fill" style="width:${mqs}%;background:${mqsColor}"></div></div></td>
+  </tr>`;
+  document.getElementById('score-tbody').innerHTML = html;
+}
+
+function generateAnalysis(catScores, mqs, ewScore, sectorCloses, vixPrice, rsi) {
+  const perfs = SECTORS.map(sym => {
+    const closes = sectorCloses[sym];
+    if (!closes || closes.length < 6) return null;
+    return {sym, p: pctChange(closes, 5)};
+  }).filter(x=>x&&x.p!==null);
+  perfs.sort((a,b)=>b.p-a.p);
+  const topSectors = perfs.slice(0,2).map(x=>SECTOR_NAMES[x.sym]||x.sym).join(' and ');
+  const botSectors = perfs.slice(-2).map(x=>SECTOR_NAMES[x.sym]||x.sym).join(' and ');
+
+  const vixDesc = vixPrice !== null ? (vixPrice < 16 ? 'low volatility' : vixPrice < 22 ? 'moderate volatility' : vixPrice < 30 ? 'elevated volatility' : 'extreme fear conditions') : 'mixed volatility';
+  const breadthDesc = catScores.breadth >= 75 ? 'broad market participation' : catScores.breadth >= 55 ? 'mixed breadth with selective strength' : 'narrow leadership and weakening breadth';
+  const rsiDesc = rsi !== null ? (rsi >= 65 ? 'overbought conditions' : rsi >= 50 ? 'healthy momentum' : rsi >= 40 ? 'weakening momentum' : 'oversold conditions') : 'neutral momentum';
+
+  const ts = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false});
+
+  let line1, line2, line3;
+  if (mqs >= 80) {
+    line1 = `Strong trend environment with ${breadthDesc} and ${vixDesc}.`;
+    line2 = `Sector leadership concentrated in ${topSectors}. RSI showing ${rsiDesc}.`;
+    line3 = `VERDICT: Favor full-size swing trades with defined risk. Press winners.`;
+  } else if (mqs >= 60) {
+    line1 = `Mixed market conditions with ${vixDesc}. Trend structure ${catScores.trend>=55?'holding':'deteriorating'}.`;
+    line2 = `${breadthDesc.charAt(0).toUpperCase()+breadthDesc.slice(1)}. Rotation favoring ${topSectors} over ${botSectors}.`;
+    line3 = `VERDICT: Reduce position sizing to 50%. A+ setups only. ${ewScore>=65?'Execution window is open.':'Wait for cleaner entry signals.'}`;
+  } else {
+    line1 = `Elevated risk environment. ${vixDesc.charAt(0).toUpperCase()+vixDesc.slice(1)} with ${breadthDesc}.`;
+    line2 = `Trend structure showing weakness across most sectors. ${catScores.macro<45?'Macro headwinds (yields/dollar) adding pressure.':''}`;
+    line3 = `VERDICT: Capital preservation mode. Avoid new swing entries. Reduce exposure and wait for regime reset.`;
+  }
+
+  const text = `> TERMINAL ANALYSIS [${ts}]\n> ─────────────────────────────────────────────────\n> ${line1}\n> ${line2}\n> ${line3}\n> ─────────────────────────────────────────────────\n> MQS: ${mqs.toFixed(1)}% | EWS: ${ewScore}% | MODE: ${currentMode.toUpperCase()}`;
+  document.getElementById('terminal-text').innerHTML = text + '<span id="terminal-cursor"></span>';
+}
+
+function updateTicker(prices, changes) {
+  const items = [
+    {sym:'SPY', ...prices.spy},
+    {sym:'QQQ', ...prices.qqq},
+    {sym:'VIX', ...prices.vix},
+    {sym:'TNX', ...prices.tnx},
+    {sym:'DXY', ...prices.dxy},
+    ...SECTORS.map(s => ({sym:s, ...prices[s.toLowerCase()]}))
+  ];
+  let html = '';
+  for (const item of items) {
+    if (!item || item.price === undefined) continue;
+    const p = item.price !== null ? item.price.toFixed(2) : '--';
+    const c = item.change !== null && item.change !== undefined ? (item.change >= 0 ? '+' : '') + item.change.toFixed(2) + '%' : '';
+    const cls = item.change >= 0 ? 'pos' : 'neg';
+    html += `<span class="tick-item"><span class="sym">${item.sym}</span> <span class="val">${p}</span> <span class="chg ${cls}">${c}</span></span>`;
+  }
+  // Duplicate for seamless loop
+  const full = html + html;
+  document.getElementById('ticker-content').outerHTML = `<span id="ticker-inner">${full}</span>`;
+}
+
+// ─── MAIN REFRESH ────────────────────────────────────────────────────────────
+async function refresh() {
+  setStatus('updating');
+  const fomcDays = checkFOMC();
+  const modeAdj = currentMode === 'day' ? -2 : 0;
+
+  // Fetch all data in parallel
+  const [spyLong, qqqLong, vixLong, tnxData, dxyData, ...sectorData] = await Promise.all([
+    fetchYahoo('SPY', '1y', '1d'),
+    fetchYahoo('QQQ', '1y', '1d'),
+    fetchYahoo('^VIX', '1y', '1d'),
+    fetchYahoo('^TNX', '5d', '1d'),
+    fetchYahoo('DX-Y.NYB', '5d', '1d'),
+    ...SECTORS.map(s => fetchYahoo(s, '1y', '1d'))
+  ]);
+
+  // Extract closes
+  const spyCloses = extractCloses(spyLong);
+  const qqqCloses = extractCloses(qqqLong);
+  const vixCloses = extractCloses(vixLong);
+  const tnxPrice = extractPrice(tnxData);
+  const dxyPrice = extractPrice(dxyData);
+  const sectorCloses = {};
+  SECTORS.forEach((s, i) => { sectorCloses[s] = extractCloses(sectorData[i]); });
+
+  const vixPrice = vixCloses.length ? vixCloses[vixCloses.length-1] : null;
+
+  // Score
+  const volScore    = scoreVolatility(vixPrice, vixCloses, modeAdj);
+  const trendScore  = scoreTrend(spyCloses, qqqCloses, modeAdj);
+  const breadthScore= scoreBreadth(sectorCloses);
+  const momScore    = scoreMomentum(sectorCloses);
+  const macroScore  = scoreMacro(tnxPrice, dxyPrice, fomcDays);
+  const ewScore     = scoreExecutionWindow(spyCloses, vixCloses, sectorCloses);
+
+  const mqs = (volScore*0.25) + (trendScore*0.20) + (breadthScore*0.20) + (momScore*0.25) + (macroScore*0.10);
+  const catScores = {vol:volScore, trend:trendScore, breadth:breadthScore, mom:momScore, macro:macroScore};
+
+  // Build price map for ticker
+  const tickerPrices = {
+    spy: {price: spyCloses.length ? spyCloses[spyCloses.length-1] : null, change: pctChange(spyCloses, 1)},
+    qqq: {price: qqqCloses.length ? qqqCloses[qqqCloses.length-1] : null, change: pctChange(qqqCloses, 1)},
+    vix: {price: vixPrice, change: pctChange(vixCloses, 1)},
+    tnx: {price: tnxPrice, change: null},
+    dxy: {price: dxyPrice, change: null},
+  };
+  SECTORS.forEach(s => {
+    const c = sectorCloses[s];
+    tickerPrices[s.toLowerCase()] = {
+      price: c.length ? c[c.length-1] : null,
+      change: pctChange(c, 1)
+    };
+  });
+
+  // Render everything
+  renderDecision(mqs);
+  updateGauge(mqs);
+  document.getElementById('gauge-pct').textContent = Math.round(mqs);
+  document.getElementById('ew-score').textContent = ewScore;
+
+  const rsi = calcRSI(spyCloses);
+  renderVolPanel(vixPrice, vixCloses, volScore);
+  renderTrendPanel(spyCloses, qqqCloses, trendScore);
+  renderBreadthPanel(sectorCloses, breadthScore);
+  renderMomentumPanel(sectorCloses, momScore);
+  renderMacroPanel(tnxPrice, dxyPrice, fomcDays, macroScore);
+  renderHeatmap(sectorCloses);
+  renderScoreBreakdown(catScores, mqs);
+  generateAnalysis(catScores, mqs, ewScore, sectorCloses, vixPrice, rsi);
+  updateTicker(tickerPrices, {});
+
+  lastFetch = Date.now();
+  setStatus('live');
+  startUpdateCounter();
+}
+
+function setStatus(s) {
+  const dot = document.getElementById('status-dot');
+  const txt = document.getElementById('status-text');
+  if (s === 'live') { dot.className = 'status-dot live'; txt.textContent = 'LIVE'; }
+  else { dot.className = 'status-dot'; txt.textContent = 'UPDATING'; }
+}
+
+let counterInterval = null;
+function startUpdateCounter() {
+  if (counterInterval) clearInterval(counterInterval);
+  counterInterval = setInterval(() => {
+    if (!lastFetch) return;
+    const sec = Math.round((Date.now() - lastFetch) / 1000);
+    document.getElementById('last-updated').textContent = `updated ${sec}s ago`;
+    if (Date.now() - lastFetch > STALE_THRESHOLD) {
+      document.getElementById('last-updated').style.color = 'var(--amber)';
+    }
+  }, 1000);
+}
+
+function manualRefresh() {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refresh().then(() => {
+    refreshTimer = setInterval(refresh, REFRESH_INTERVAL);
+  });
+}
+
+function setMode(mode) {
+  currentMode = mode;
+  document.getElementById('btn-swing').className = 'mode-btn' + (mode==='swing'?' active':'');
+  document.getElementById('btn-day').className = 'mode-btn' + (mode==='day'?' active':'');
+  refresh();
+}
+
+// ─── BOOT ────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  checkFOMC();
+  refresh();
+  refreshTimer = setInterval(refresh, REFRESH_INTERVAL);
+});
+</script>
+</body>
+</html>
