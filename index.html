@@ -306,123 +306,96 @@ let scores = {};
 let refreshTimer = null;
 let updateTimer = null;
 
-// ─── DATA FETCHING (Finnhub quotes + Polygon candles) ───────────────────────
+// ─── DATA FETCHING ──────────────────────────────────────────────────────────
+// Strategy:
+//   Finnhub  → 16 parallel real-time quotes (CORS-native, 60 req/min free)
+//   Polygon  → 2 calls only: SPY + QQQ 252-day history (for SMA/RSI)
+//   Polygon  → grouped market endpoint: all sectors in 1 call per date
 
-// Fetch historical daily closes from Polygon (up to 252 days)
-async function fetchPolygonCandles(ticker, days=252) {
-  const to = new Date();
-  const from = new Date(to.getTime() - (days+60)*86400*1000); // buffer for weekends/holidays
-  const toStr = to.toISOString().slice(0,10);
-  const fromStr = from.toISOString().slice(0,10);
-  const polyTicker = POLYGON_TICKERS[ticker] || ticker;
-  const url = `https://api.polygon.io/v2/aggs/ticker/${polyTicker}/range/1/day/${fromStr}/${toStr}?adjusted=true&sort=asc&limit=${days}&apiKey=${POLYGON_KEY}`;
+async function fetchAllQuotes() {
+  const tickers = ['SPY','QQQ','VIXY','TLT','UUP', ...SECTORS];
+  const results = await Promise.all(tickers.map(s =>
+    fetch(`https://finnhub.io/api/v1/quote?symbol=${s}&token=${FINNHUB_KEY}`, {signal: AbortSignal.timeout(8000)})
+      .then(r => r.json())
+      .then(d => ({s, c: d.c, pc: d.pc, dp: d.dp}))
+      .catch(() => ({s, c: null, pc: null, dp: null}))
+  ));
+  const map = {};
+  results.forEach(r => { map[r.s] = r; });
+  return map;
+}
+
+async function fetchPolygonHistory(ticker) {
+  const to = new Date().toISOString().slice(0, 10);
+  const from = new Date(Date.now() - 400*86400*1000).toISOString().slice(0, 10);
+  const url = `https://api.polygon.io/v2/aggs/ticker/${ticker}/range/1/day/${from}/${to}?adjusted=true&sort=asc&limit=252&apiKey=${POLYGON_KEY}`;
   try {
-    const res = await fetch(url, {signal: AbortSignal.timeout(10000)});
+    const res = await fetch(url, {signal: AbortSignal.timeout(12000)});
     if (!res.ok) return [];
     const data = await res.json();
-    if (!data.results || !data.results.length) return [];
-    return data.results.map(r => r.c); // close prices
+    return data.results ? data.results.map(r => r.c) : [];
   } catch(e) { return []; }
 }
 
-// Fetch real-time quote from Finnhub
-async function fetchFinnhubQuote(ticker) {
-  const url = `https://finnhub.io/api/v1/quote?symbol=${ticker}&token=${FINNHUB_KEY}`;
-  try {
-    const res = await fetch(url, {signal: AbortSignal.timeout(8000)});
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.c ? data : null; // c = current price
-  } catch(e) { return null; }
+function getRecentTradingDates(n) {
+  const dates = [];
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  while (dates.length < n) {
+    const dow = d.getDay();
+    if (dow !== 0 && dow !== 6) dates.unshift(d.toISOString().slice(0, 10));
+    d.setDate(d.getDate() - 1);
+  }
+  return dates;
 }
 
-// Fetch VIX: use VIXY ETF candles as VIX proxy (free tier accessible)
-// Then patch in real-time VIX quote from Finnhub for the last value
-async function fetchVIXCandles(days=252) {
-  // VIXY tracks VIX but prices are ~20-30x lower — we'll normalize
-  // Better: use VXX (iPath VIX) or just fetch quote + use flat array
-  // Strategy: fetch 252d of VIXY candles for trend/slope, patch last value with real VIX
-  const [vixyCloses, vixQuote] = await Promise.all([
-    fetchPolygonCandles('VIXY', days),
-    fetchFinnhubQuote('^VIX') // Finnhub supports index quotes
-  ]);
-  // Build synthetic VIX array: scale VIXY closes so last = real VIX
-  if (!vixQuote || !vixQuote.c) {
-    // No real VIX available — return empty so scoring uses fallback
-    return [];
+async function fetchSectorHistory(quotes) {
+  const dates = getRecentTradingDates(6);
+  const groupedByDate = {};
+  for (const date of dates) {
+    try {
+      const res = await fetch(
+        `https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/${date}?adjusted=true&apiKey=${POLYGON_KEY}`,
+        {signal: AbortSignal.timeout(10000)}
+      );
+      if (res.ok) {
+        const data = await res.json();
+        if (data.results) {
+          groupedByDate[date] = {};
+          data.results.forEach(r => { groupedByDate[date][r.T] = r.c; });
+        }
+      }
+    } catch(e) {}
+    await new Promise(r => setTimeout(r, 350));
   }
-  const realVIX = vixQuote.c;
-  if (!vixyCloses.length) {
-    // No history — return array of current VIX for flat trend
-    return Array(20).fill(realVIX);
-  }
-  // Scale VIXY to VIX magnitude
-  const vixyLast = vixyCloses[vixyCloses.length-1];
-  const scale = realVIX / vixyLast;
-  const scaled = vixyCloses.map(v => v * scale);
-  scaled[scaled.length-1] = realVIX; // pin last to real value
-  return scaled;
-}
-
-// Fetch TNX (10Y yield) from Finnhub — symbol: 'FRED:GS10' or use quote
-async function fetchTNXPrice() {
-  // Alpha Vantage doesn't work client-side; use a proxy-free approach
-  // Polygon free tier supports some ETF proxies: TLT inverse relationship won't work
-  // Use hardcoded recent value as fallback (last known) — real-time via Finnhub not available for bonds
-  // Try Finnhub economic data endpoint
-  try {
-    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=TLT&token=${FINNHUB_KEY}`, {signal: AbortSignal.timeout(6000)});
-    const d = await res.json();
-    if (d && d.c) {
-      // TLT price inversely correlated to 10Y yield
-      // TLT ~$85 ≈ 5.0%, TLT ~$95 ≈ 4.0%, TLT ~$105 ≈ 3.0%
-      // Rough formula: yield ≈ (960 - 8*TLT_price) / 100 — very approximate
-      // Better: use fixed recent value from pipeline data, or just fetch TNX ETF
-      const tlt = d.c;
-      const approxTNX = Math.max(3.0, Math.min(5.5, (960 - 8*tlt) / 100));
-      return approxTNX;
+  const sectorCloses = {};
+  for (const sym of SECTORS) {
+    const closes = [];
+    for (const date of dates) {
+      if (groupedByDate[date] && groupedByDate[date][sym] != null) {
+        closes.push(groupedByDate[date][sym]);
+      }
     }
-  } catch(e) {}
-  return 4.3; // fallback: recent approximate value
-}
-
-// Fetch DXY approximate from Finnhub UUP (Dollar ETF)
-async function fetchDXYPrice() {
-  try {
-    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=UUP&token=${FINNHUB_KEY}`, {signal: AbortSignal.timeout(6000)});
-    const d = await res.json();
-    if (d && d.c) {
-      // UUP ~$28 ≈ DXY 100, UUP ~$30 ≈ DXY 108 — rough linear
-      // formula: DXY ≈ UUP * 3.57 (empirical)
-      return d.c * 3.57;
+    if (quotes[sym] && quotes[sym].c) closes.push(quotes[sym].c);
+    // Pad to 52 entries so 50d SMA works (using prev close)
+    if (closes.length < 52 && quotes[sym] && quotes[sym].pc) {
+      const pad = Array(52 - closes.length).fill(quotes[sym].pc);
+      sectorCloses[sym] = [...pad, ...closes];
+    } else {
+      sectorCloses[sym] = closes;
     }
-  } catch(e) {}
-  return 103; // fallback: recent approximate value
-}
-
-function calcSMA(closes, period) {
-  if (closes.length < period) return null;
-  const slice = closes.slice(-period);
-  return slice.reduce((a,b)=>a+b,0) / period;
-}
-
-function calcRSI(closes, period=14) {
-  if (closes.length < period + 1) return null;
-  let gains = 0, losses = 0;
-  for (let i = closes.length - period; i < closes.length; i++) {
-    const diff = closes[i] - closes[i-1];
-    if (diff > 0) gains += diff; else losses -= diff;
   }
-  if (losses === 0) return 100;
-  const rs = (gains/period) / (losses/period);
-  return 100 - (100/(1+rs));
+  return sectorCloses;
 }
 
-function pctChange(closes, days=5) {
-  if (closes.length < days+1) return null;
-  const old = closes[closes.length-days-1];
-  const now = closes[closes.length-1];
-  return ((now - old) / old) * 100;
+function tltToTNX(tlt) {
+  if (!tlt) return 4.3;
+  return +Math.max(2.5, Math.min(6.0, (475 - 4 * tlt) / 100)).toFixed(2);
+}
+
+function uupToDXY(uup) {
+  if (!uup) return 103;
+  return +(uup * 3.57).toFixed(1);
 }
 
 // ─── FOMC CHECK ─────────────────────────────────────────────────────────────
@@ -883,35 +856,30 @@ async function refresh() {
   const fomcDays = checkFOMC();
   const modeAdj = currentMode === 'day' ? -2 : 0;
 
-  // Fetch data in two batches to avoid Polygon rate limits (free tier: 5 req/min)
-  // Batch 1: Core indices + quotes (fast)
-  const [spyCloses, qqqCloses, vixCloses, tnxPrice, dxyPrice, spyQuote, qqqQuote] = await Promise.all([
-    fetchPolygonCandles('SPY', 252),
-    fetchPolygonCandles('QQQ', 252),
-    fetchVIXCandles(252),
-    fetchTNXPrice(),
-    fetchDXYPrice(),
-    fetchFinnhubQuote('SPY'),
-    fetchFinnhubQuote('QQQ'),
+  // Step 1: Parallel — Finnhub quotes + SPY/QQQ Polygon history
+  const [quotes, spyClosesRaw, qqqClosesRaw] = await Promise.all([
+    fetchAllQuotes(),
+    fetchPolygonHistory('SPY'),
+    fetchPolygonHistory('QQQ'),
   ]);
 
-  // Batch 2: Sectors — split into two waves to avoid 429s
-  const sectors1 = SECTORS.slice(0, 6);
-  const sectors2 = SECTORS.slice(6);
-  const sectorBatch1 = await Promise.all(sectors1.map(s => fetchPolygonCandles(s, 252)));
-  await new Promise(r => setTimeout(r, 1200)); // brief pause
-  const sectorBatch2 = await Promise.all(sectors2.map(s => fetchPolygonCandles(s, 252)));
-  const sectorResults = [...sectorBatch1, ...sectorBatch2];
+  // Step 2: Sector history (Polygon grouped, sequential with 350ms gaps)
+  const sectorCloses = await fetchSectorHistory(quotes);
 
-  // Sector closes map
-  const sectorCloses = {};
-  SECTORS.forEach((s, i) => { sectorCloses[s] = sectorResults[i] || []; });
+  // Patch last close with Finnhub real-time
+  const spyCloses = [...spyClosesRaw];
+  const qqqCloses = [...qqqClosesRaw];
+  if (quotes.SPY && quotes.SPY.c && spyCloses.length) spyCloses[spyCloses.length-1] = quotes.SPY.c;
+  if (quotes.QQQ && quotes.QQQ.c && qqqCloses.length) qqqCloses[qqqCloses.length-1] = quotes.QQQ.c;
 
-  // Use Finnhub real-time price to patch last close for SPY/QQQ if available
-  if (spyQuote && spyQuote.c && spyCloses.length) spyCloses[spyCloses.length-1] = spyQuote.c;
-  if (qqqQuote && qqqQuote.c && qqqCloses.length) qqqCloses[qqqCloses.length-1] = qqqQuote.c;
+  // VIX: VIXY * 3.5 ≈ VIX
+  const vixPrice = quotes.VIXY && quotes.VIXY.c ? +(quotes.VIXY.c * 3.5).toFixed(2) : null;
+  const vixCloses = vixPrice ? Array(20).fill(vixPrice) : [];
 
-  const vixPrice = vixCloses.length ? vixCloses[vixCloses.length-1] : null;
+  // TNX and DXY from proxy ETFs
+  const tnxPrice = tltToTNX(quotes.TLT ? quotes.TLT.c : null);
+  const dxyPrice = uupToDXY(quotes.UUP ? quotes.UUP.c : null);
+
 
   // Score
   const volScore    = scoreVolatility(vixPrice, vixCloses, modeAdj);
@@ -924,21 +892,18 @@ async function refresh() {
   const mqs = (volScore*0.25) + (trendScore*0.20) + (breadthScore*0.20) + (momScore*0.25) + (macroScore*0.10);
   const catScores = {vol:volScore, trend:trendScore, breadth:breadthScore, mom:momScore, macro:macroScore};
 
-  // Build price map for ticker — use Finnhub real-time for SPY/QQQ
-  const spyChange = spyQuote && spyQuote.pc ? ((spyQuote.c - spyQuote.pc) / spyQuote.pc * 100) : pctChange(spyCloses, 1);
-  const qqqChange = qqqQuote && qqqQuote.pc ? ((qqqQuote.c - qqqQuote.pc) / qqqQuote.pc * 100) : pctChange(qqqCloses, 1);
+  // Ticker — all from Finnhub real-time quotes
   const tickerPrices = {
-    spy: {price: spyQuote ? spyQuote.c : (spyCloses.length ? spyCloses[spyCloses.length-1] : null), change: spyChange},
-    qqq: {price: qqqQuote ? qqqQuote.c : (qqqCloses.length ? qqqCloses[qqqCloses.length-1] : null), change: qqqChange},
-    vix: {price: vixPrice, change: pctChange(vixCloses, 1)},
+    spy: {price: quotes.SPY && quotes.SPY.c, change: quotes.SPY && quotes.SPY.dp},
+    qqq: {price: quotes.QQQ && quotes.QQQ.c, change: quotes.QQQ && quotes.QQQ.dp},
+    vix: {price: vixPrice, change: null},
     tnx: {price: tnxPrice, change: null},
     dxy: {price: dxyPrice, change: null},
   };
   SECTORS.forEach(s => {
-    const c = sectorCloses[s];
     tickerPrices[s.toLowerCase()] = {
-      price: c.length ? c[c.length-1] : null,
-      change: pctChange(c, 1)
+      price: (quotes[s] && quotes[s].c) || null,
+      change: (quotes[s] && quotes[s].dp) || null
     };
   });
 
