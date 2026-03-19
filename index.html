@@ -254,19 +254,27 @@
 
 </div>
 
-<div id="footer">SHOULD I BE TRADING? · APPFORGELABS · DATA: YAHOO FINANCE · NOT FINANCIAL ADVICE</div>
+<div id="footer">SHOULD I BE TRADING? · APPFORGELABS · DATA: FINNHUB + POLYGON · NOT FINANCIAL ADVICE</div>
 
 <script>
 // ─── CONFIG ────────────────────────────────────────────────────────────────
-const PROXY = 'https://api.allorigins.win/raw?url=';
-const PROXY2 = 'https://corsproxy.io/?url=';
+const FINNHUB_KEY = 'd6952r9r01qs7u9kq240d6952r9r01qs7u9kq24g';
+const POLYGON_KEY = 'D2BcKzvYOpCfDBmHedtLAHu2CV3jKtU7';
 const REFRESH_INTERVAL = 45000;
 const STALE_THRESHOLD = 300000;
 
-const SYMBOLS = {
-  spy: 'SPY', qqq: 'QQQ', vix: '^VIX', dxy: 'DX-Y.NYB', tnx: '^TNX',
-  xlk:'XLK', xlf:'XLF', xle:'XLE', xlv:'XLV', xli:'XLI',
-  xly:'XLY', xlp:'XLP', xlu:'XLU', xlb:'XLB', xlre:'XLRE', xlc:'XLC'
+// Polygon ticker map (handles indices and ETFs)
+const POLYGON_TICKERS = {
+  SPY:'SPY', QQQ:'QQQ', VIX:'I:VIX', TNX:'I:TNX', DXY:'I:DXY',
+  XLK:'XLK', XLF:'XLF', XLE:'XLE', XLV:'XLV', XLI:'XLI',
+  XLY:'XLY', XLP:'XLP', XLU:'XLU', XLB:'XLB', XLRE:'XLRE', XLC:'XLC'
+};
+
+// Finnhub ticker map (quote endpoint only, use for real-time)
+const FINNHUB_TICKERS = {
+  SPY:'SPY', QQQ:'QQQ',
+  XLK:'XLK', XLF:'XLF', XLE:'XLE', XLV:'XLV', XLI:'XLI',
+  XLY:'XLY', XLP:'XLP', XLU:'XLU', XLB:'XLB', XLRE:'XLRE', XLC:'XLC'
 };
 
 const SECTORS = ['XLK','XLF','XLE','XLV','XLI','XLY','XLP','XLU','XLB','XLRE','XLC'];
@@ -295,39 +303,51 @@ let scores = {};
 let refreshTimer = null;
 let updateTimer = null;
 
-// ─── DATA FETCHING ──────────────────────────────────────────────────────────
-async function fetchYahoo(symbol, range='5d', interval='1d') {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`;
-  const proxied = PROXY + encodeURIComponent(url);
-  const proxied2 = PROXY2 + encodeURIComponent(url);
+// ─── DATA FETCHING (Finnhub quotes + Polygon candles) ───────────────────────
+
+// Fetch historical daily closes from Polygon (up to 252 days)
+async function fetchPolygonCandles(ticker, days=252) {
+  const to = new Date();
+  const from = new Date(to.getTime() - (days+60)*86400*1000); // buffer for weekends/holidays
+  const toStr = to.toISOString().slice(0,10);
+  const fromStr = from.toISOString().slice(0,10);
+  const polyTicker = POLYGON_TICKERS[ticker] || ticker;
+  const url = `https://api.polygon.io/v2/aggs/ticker/${polyTicker}/range/1/day/${fromStr}/${toStr}?adjusted=true&sort=asc&limit=${days}&apiKey=${POLYGON_KEY}`;
   try {
-    let res = await fetch(proxied, {signal: AbortSignal.timeout(8000)});
-    if (!res.ok) throw new Error('allorigins failed');
-    return await res.json();
-  } catch(e) {
-    try {
-      let res = await fetch(proxied2, {signal: AbortSignal.timeout(8000)});
-      if (!res.ok) throw new Error('corsproxy failed');
-      return await res.json();
-    } catch(e2) { return null; }
-  }
+    const res = await fetch(url, {signal: AbortSignal.timeout(10000)});
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!data.results || !data.results.length) return [];
+    return data.results.map(r => r.c); // close prices
+  } catch(e) { return []; }
 }
 
-function extractPrice(data) {
+// Fetch real-time quote from Finnhub
+async function fetchFinnhubQuote(ticker) {
+  const url = `https://finnhub.io/api/v1/quote?symbol=${ticker}&token=${FINNHUB_KEY}`;
   try {
-    const r = data.chart.result[0];
-    const q = r.indicators.quote[0];
-    const closes = q.close.filter(x => x !== null);
-    return closes[closes.length - 1];
+    const res = await fetch(url, {signal: AbortSignal.timeout(8000)});
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.c ? data : null; // c = current price
   } catch(e) { return null; }
 }
 
-function extractCloses(data, n=null) {
-  try {
-    const q = data.chart.result[0].indicators.quote[0];
-    let closes = q.close.filter(x => x !== null);
-    return n ? closes.slice(-n) : closes;
-  } catch(e) { return []; }
+// Fetch VIX from Polygon index candles
+async function fetchVIXCandles(days=252) {
+  return fetchPolygonCandles('VIX', days);
+}
+
+// Fetch TNX (10Y yield) from Polygon
+async function fetchTNXPrice() {
+  const closes = await fetchPolygonCandles('TNX', 5);
+  return closes.length ? closes[closes.length-1] : null;
+}
+
+// Fetch DXY from Polygon
+async function fetchDXYPrice() {
+  const closes = await fetchPolygonCandles('DXY', 5);
+  return closes.length ? closes[closes.length-1] : null;
 }
 
 function calcSMA(closes, period) {
@@ -813,24 +833,25 @@ async function refresh() {
   const fomcDays = checkFOMC();
   const modeAdj = currentMode === 'day' ? -2 : 0;
 
-  // Fetch all data in parallel
-  const [spyLong, qqqLong, vixLong, tnxData, dxyData, ...sectorData] = await Promise.all([
-    fetchYahoo('SPY', '1y', '1d'),
-    fetchYahoo('QQQ', '1y', '1d'),
-    fetchYahoo('^VIX', '1y', '1d'),
-    fetchYahoo('^TNX', '5d', '1d'),
-    fetchYahoo('DX-Y.NYB', '5d', '1d'),
-    ...SECTORS.map(s => fetchYahoo(s, '1y', '1d'))
+  // Fetch all data in parallel — Polygon candles + Finnhub real-time quotes
+  const [spyCloses, qqqCloses, vixCloses, tnxPrice, dxyPrice, spyQuote, qqqQuote, ...sectorResults] = await Promise.all([
+    fetchPolygonCandles('SPY', 252),
+    fetchPolygonCandles('QQQ', 252),
+    fetchVIXCandles(252),
+    fetchTNXPrice(),
+    fetchDXYPrice(),
+    fetchFinnhubQuote('SPY'),
+    fetchFinnhubQuote('QQQ'),
+    ...SECTORS.map(s => fetchPolygonCandles(s, 252))
   ]);
 
-  // Extract closes
-  const spyCloses = extractCloses(spyLong);
-  const qqqCloses = extractCloses(qqqLong);
-  const vixCloses = extractCloses(vixLong);
-  const tnxPrice = extractPrice(tnxData);
-  const dxyPrice = extractPrice(dxyData);
+  // Sector closes map
   const sectorCloses = {};
-  SECTORS.forEach((s, i) => { sectorCloses[s] = extractCloses(sectorData[i]); });
+  SECTORS.forEach((s, i) => { sectorCloses[s] = sectorResults[i] || []; });
+
+  // Use Finnhub real-time price to patch last close for SPY/QQQ if available
+  if (spyQuote && spyQuote.c && spyCloses.length) spyCloses[spyCloses.length-1] = spyQuote.c;
+  if (qqqQuote && qqqQuote.c && qqqCloses.length) qqqCloses[qqqCloses.length-1] = qqqQuote.c;
 
   const vixPrice = vixCloses.length ? vixCloses[vixCloses.length-1] : null;
 
@@ -845,10 +866,12 @@ async function refresh() {
   const mqs = (volScore*0.25) + (trendScore*0.20) + (breadthScore*0.20) + (momScore*0.25) + (macroScore*0.10);
   const catScores = {vol:volScore, trend:trendScore, breadth:breadthScore, mom:momScore, macro:macroScore};
 
-  // Build price map for ticker
+  // Build price map for ticker — use Finnhub real-time for SPY/QQQ
+  const spyChange = spyQuote && spyQuote.pc ? ((spyQuote.c - spyQuote.pc) / spyQuote.pc * 100) : pctChange(spyCloses, 1);
+  const qqqChange = qqqQuote && qqqQuote.pc ? ((qqqQuote.c - qqqQuote.pc) / qqqQuote.pc * 100) : pctChange(qqqCloses, 1);
   const tickerPrices = {
-    spy: {price: spyCloses.length ? spyCloses[spyCloses.length-1] : null, change: pctChange(spyCloses, 1)},
-    qqq: {price: qqqCloses.length ? qqqCloses[qqqCloses.length-1] : null, change: pctChange(qqqCloses, 1)},
+    spy: {price: spyQuote ? spyQuote.c : (spyCloses.length ? spyCloses[spyCloses.length-1] : null), change: spyChange},
+    qqq: {price: qqqQuote ? qqqQuote.c : (qqqCloses.length ? qqqCloses[qqqCloses.length-1] : null), change: qqqChange},
     vix: {price: vixPrice, change: pctChange(vixCloses, 1)},
     tnx: {price: tnxPrice, change: null},
     dxy: {price: dxyPrice, change: null},
